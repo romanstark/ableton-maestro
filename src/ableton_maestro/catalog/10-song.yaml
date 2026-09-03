@@ -1,0 +1,2546 @@
+# Ableton Maestro - LOM path catalog, part 1:
+# Live.Application, Live.Song.Song, transport, Scene, CuePoint.
+#
+# One row per addressable place in the application and the song object. The
+# catalog is data, not code, and that is the whole point: the Remote Script
+# loads only when Live starts, so every new handler costs every user a full
+# restart, while a new catalog row costs nothing (docs/architecture.md, "the restart tax",
+# docs/protocol.md section 9). A capability that can be a row must not become a
+# handler.
+#
+# Files in this directory are numbered and merged, in name order, into one flat
+# list. `id` is unique across the whole catalog; the part before the first dot
+# is the area.
+#
+# Conventions, stated once here so the rows stay short:
+#
+# * `status` is per row, and it is a measurement rather than an intention.
+#   `verified` means the row was read, called or written against a running Live;
+#   its `doc` carries the date and the Live version and says which of the three
+#   was done, because a row verified by reading is not thereby verified for
+#   writing. `broken` means the path exists and Live refuses it, and the `doc`
+#   says how it fails. `untested` means nobody has run it: it is the default,
+#   and it is never an implied "works". scripts/probe_paths.py and
+#   scripts/sync_catalog.py are what move a row from one to another. A tool
+#   description built on this file may say a thing works only where the row is
+#   `verified` - anything else would be a guess wearing a fact's clothes, and a
+#   wrong `verified` is worse than a missing row (docs/architecture.md, "the
+#   catalog").
+# * `observe` in `access` means the LOM is expected to offer an
+#   `add_<property>_listener`. Listener availability is per property, and no row
+#   in this file has been verified by subscribing: where a row carries `observe`
+#   and reads `verified`, the `doc` records a read, a call or a write, never an
+#   observation. Read `observe` as expected, not measured.
+# * A path that ends on a DeviceParameter names the parameter object, not its
+#   `.value`. The script reads `.value` and adds `display` from
+#   `str_for_value()` (docs/protocol.md section 5.3), which is why such rows
+#   carry a value `kind` and a `display`, not `kind: object`.
+# * For `access: [call]` rows, `kind` is the type of the returned result. The
+#   kind vocabulary has no null member, so a method that returns nothing is
+#   written `kind: object` and says so in `doc`.
+# * `unit` has no `bpm` member. Tempo therefore carries `unit: none` and states
+#   BPM in `doc` rather than inventing vocabulary.
+# * Times are in beats unless a doc says otherwise. Live counts arrangement and
+#   clip time in beats - not bars, not seconds.
+# * `verify: read_back` where a following read proves the write;
+#   `verify: none` where nothing on the same path can prove it. For call rows
+#   the doc names the path a caller should read to confirm the effect.
+
+# ---------------------------------------------------------------------------
+# Application - Live.Application.get_application(), root `app`
+# ---------------------------------------------------------------------------
+
+- id: app.major_version
+  path: app
+  access: [call]
+  method: get_major_version
+  kind: int
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Live's major version, e.g. 12. A method on Live.Application, not a property, which is
+    why it is a call. This is the gate for every Live 12 only row in this catalog
+    (scale_name, root_note, scale_intervals): the catalog cannot know at load time which
+    Live the user is running, so the server asks. Call verified 2026-08-30 against Live
+    12.4.5: invoked and it answered "12". The call only reads;
+    nothing in the set was changed.
+
+- id: app.minor_version
+  path: app
+  access: [call]
+  method: get_minor_version
+  kind: int
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Live's minor version, e.g. 4 for 12.4.3. Together with app.major_version and
+    app.bugfix_version this is the only version information the LOM offers; the build
+    string in the About box is not exposed. Call verified 2026-08-30 against Live 12.4.5:
+    invoked and it answered "4". The call only reads; nothing in
+    the set was changed.
+
+- id: app.bugfix_version
+  path: app
+  access: [call]
+  method: get_bugfix_version
+  kind: int
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Live's patch level, e.g. 3 for 12.4.3. Worth logging: Live updates itself and moves
+    its Preferences folder with every point release (measured), so a version jump explains
+    a suddenly missing configuration. Call verified 2026-08-30 against Live 12.4.5: invoked and
+    it answered "5". The call only reads; nothing in the
+    set was changed.
+
+- id: app.version_string
+  path: app
+  access: [call]
+  method: get_version_string
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Full version as a string. It may not exist on older Live versions - prefer the three
+    numeric getters and only fall back to this. If the call returns unknown_handler or
+    live_error, that answers the question. Call
+    verified 2026-08-30 against Live 12.4.5: invoked and it
+    answered "12.4.5". The call only reads; nothing in the set was changed.
+
+- id: app.get_document
+  path: app
+  access: [call]
+  method: get_document
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The Song object for the open set, returned as a handle (docs/protocol.md section 7).
+    Everything in this file reaches the same object through the `song` root, so this row
+    exists to prove the two are identical, not as a working path. Call verified 2026-08-30
+    against Live 12.4.5: invoked and it answered "{'__lom__':
+    'Song', 'path': None, 'name': 'AbletonMaestr". The call only reads; nothing in the set
+    was changed.
+
+- id: app.open_dialog_count
+  path: app.open_dialog_count
+  access: [get, observe]
+  kind: int
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Number of modal dialogs Live currently shows. Non-zero means Live is blocked and most
+    writes will silently do nothing or queue - a useful pre-flight check before a batch.
+    Read-only.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: app.current_dialog_message
+  path: app.current_dialog_message
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Text of the frontmost dialog, empty when none is open. The one way for the server to
+    tell a human why Live stopped responding to writes instead of reporting a timeout with
+    no explanation.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: app.current_dialog_button_count
+  path: app.current_dialog_button_count
+  access: [get]
+  kind: int
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    How many buttons the frontmost dialog offers. Read it before ever calling
+    app.press_current_dialog_button, since the index is not bounds-checked by Live and an
+    out-of-range press inside Live's process is not a recoverable error for us.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: app.press_current_dialog_button
+  path: app
+  access: [call]
+  method: press_current_dialog_button
+  kind: object
+  unit: none
+  destructive: true
+  verify: none
+  status: broken
+  doc: >-
+    Press a button in Live's frontmost dialog by index. Returns nothing. Marked
+    destructive because the button behind an index is unknown to us - it can be
+    "Don't Save" on a set with unsaved work. Read
+    app.current_dialog_message and app.current_dialog_button_count first, and let
+    a human decide.
+    REFUSED by this script's allowlist, by design: it clicks whatever modal dialog happens to
+    be open, and the target cannot be known from here. A blind click can accept 'discard
+    changes?' or a plugin licence prompt as easily as the intended one.
+    The hazard is measured, not hypothetical: on 2026-08-29 against Live 12.4.5, Live's legacy
+    note API opened a modal dialog that blocked Live's main thread until a human clicked it.
+    The answer to that is to stop opening dialogs, not to teach the script to click away ones
+    it cannot see.
+  args:
+    - {name: index, kind: int, required: true}
+
+- id: app.control_surfaces
+  path: app.control_surfaces
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The loaded control surfaces, as handles. This is how the server can check that our own
+    Remote Script is actually the one Live loaded - from the wrong folder Live loads
+    nothing and says nothing (docs/protocol.md section 9), and an empty or unexpected list
+    here is the only visible symptom.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: app.browser
+  path: app.browser
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Live's browser root, as a handle. Do not walk it with lom_get: the browser is a
+    separate object graph with its own recursion and needs the browser_walk handler and
+    its depth and result caps (docs/protocol.md section 5.10).
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: app.focused_document_view
+  path: app.view.focused_document_view
+  access: [get, observe]
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Which main view has focus, "Session" or "Arranger". Read-only; to change it, call
+    app.focus_view or app.show_view. Knowing this matters because several Song operations
+    act on "the visible view" rather than on an explicit target.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: app.available_main_views
+  path: app.view
+  access: [call]
+  method: available_main_views
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The view names the other view calls accept, expected to be Browser, Arranger, Session,
+    Detail, Detail/Clip and Detail/DeviceChain. Call this rather than hard-coding the
+    names; the list is what Live will accept, our memory is not. Call verified 2026-08-30
+    against Live 12.4.5: invoked and it answered "['Browser', 'Arranger', 'Session',
+    'Detail', 'Detail/Clip', ". The call only reads; nothing in the set was changed.
+
+- id: app.is_view_visible
+  path: app.view
+  access: [call]
+  method: is_view_visible
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether a named view is visible. Takes one string argument from
+    app.available_main_views. An unknown name is expected to raise inside Live rather than
+    returning False; only a valid name was tried, so what an unknown name does is not
+    measured. Call verified 2026-08-30 against Live
+    12.4.5: invoked and it answered "True". The call only reads; nothing in the set was
+    changed.
+  args:
+    - {name: view_name, kind: str, required: true}
+
+- id: app.show_view
+  path: app.view
+  access: [call]
+  method: show_view
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Show a named view. Returns nothing; confirm with app.is_view_visible. Purely cosmetic for
+    the audio, but it decides what a human sees when they look over at the screen after a batch
+    has run. Call verified 2026-08-30 against Live 12.4.5: invoked and it returned without
+    error. The set was restored afterwards where the call had any effect.
+  args:
+    - {name: view_name, kind: str, required: true}
+
+- id: app.hide_view
+  path: app.view
+  access: [call]
+  method: hide_view
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Hide a named view. Returns nothing; confirm with app.is_view_visible. Hiding the
+    Detail view is a cheap way to stop Live from redrawing a large device chain during a
+    long batch - expected, not measured. Call verified 2026-08-30 against Live 12.4.5: invoked
+    and it returned without error. The set was restored
+    afterwards where the call had any effect.
+  args:
+    - {name: view_name, kind: str, required: true}
+
+- id: app.focus_view
+  path: app.view
+  access: [call]
+  method: focus_view
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Give keyboard focus to a named view; an empty string returns focus to the main window.
+    Returns nothing; confirm with app.focused_document_view. Call verified 2026-08-30
+    against Live 12.4.5: invoked and it returned without error.
+    The set was restored afterwards where the call had any effect.
+  args:
+    - {name: view_name, kind: str, required: true}
+
+# ---------------------------------------------------------------------------
+# Song - tempo and time signature
+# ---------------------------------------------------------------------------
+
+- id: song.tempo
+  path: song.tempo
+  access: [get, set, observe]
+  kind: float
+  range: [20.0, 999.0]
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Song tempo in BPM (the unit vocabulary has no bpm member, hence unit none). Range 20
+    to 999 as enforced by Live's UI; values outside are expected to be clamped silently,
+    which is exactly what the read-back in lom_set is for (docs/protocol.md section 5.4).
+    Tempo can be automated in the arrangement, but track automation is not writable
+    through the LOM (docs/limits.md) - a tempo ramp needs channel B or a
+    human.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.signature_numerator
+  path: song.signature_numerator
+  access: [get, set, observe]
+  kind: int
+  range: [1, 99]
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Top number of the global time signature. Changing it does not renumber anything
+    already written: clip and arrangement positions are stored in beats, so a 4/4 clip at
+    beat 8 stays at beat 8 and simply lands in a different bar.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.signature_denominator
+  path: song.signature_denominator
+  access: [get, set, observe]
+  kind: int
+  range: [1, 16]
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Bottom number of the global time signature. Live accepts powers of two only (1, 2, 4,
+    8, 16); anything else is expected to be rejected or rounded, and the read-back says
+    which. The range here is a bound, not a whitelist - the validator cannot express
+    "power of two".
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.tap_tempo
+  path: song
+  access: [call]
+  method: tap_tempo
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Tap the tempo once. Returns nothing. Meaningful only when called repeatedly in real
+    time, which a serial request-response protocol is poor at (each call is a round trip,
+    docs/protocol.md section 3) - setting song.tempo directly is almost always the right
+    tool. Kept because it is part of the surface. Call verified 2026-08-30 against Live
+    12.4.5, on a scratch track created and deleted for the
+    purpose. It ran and did what it says. Changes the tempo, so it is not a read. Restored
+    afterwards.
+
+- id: song.tempo_follower_enabled
+  path: song.tempo_follower_enabled
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether Live's Tempo Follower drives the tempo from an audio input. Live 11 and later.
+    While it is on, writes to song.tempo are expected to be overridden by the follower
+    within a beat - a write that reads back correctly and then drifts is the failure mode
+    to watch for.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.is_ableton_link_enabled
+  path: song.is_ableton_link_enabled
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether Ableton Link is on. Same warning as the tempo follower: with Link active and a
+    peer connected, the tempo belongs to the session, not to us.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.is_ableton_link_start_stop_sync_enabled
+  path: song.is_ableton_link_start_stop_sync_enabled
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether Link also synchronises start and stop, not just tempo. When true,
+    song.start_playing and song.stop_playing affect every Link peer on the
+    network.
+    Read verified 2026-08-30 against Live 12.4.5 at song.is_ableton_link_start_stop_sync_enabled
+    through lom_describe: returned False (bool). No write, call, observation or automation was
+    attempted on this row.
+
+# ---------------------------------------------------------------------------
+# Song - transport state and position
+# ---------------------------------------------------------------------------
+
+- id: song.is_playing
+  path: song.is_playing
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the transport is running. Writable in the LOM, but song.start_playing and
+    song.stop_playing are the clearer route because they say what they do. Note that this
+    reports the transport, not audibility: a running transport over an empty arrangement
+    makes no sound, and success here proves neither (docs/protocol.md section 10).
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.current_song_time
+  path: song.current_song_time
+  access: [get, set, observe]
+  kind: float
+  unit: beats
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Playhead position in beats from the start of the arrangement. Settable, which is how you
+    place the playhead before recording or before song.set_or_delete_cue. Writing while the
+    transport runs jumps the playhead rather than being ignored - MEASURED 2026-09-01 against
+    Live 12.4.5, by setting a position and reading an automated parameter back at it. But the
+    write is applied ASYNCHRONOUSLY, after the running main-thread task finishes, and a
+    lom_batch is that task: a jump and a read in the same batch return the position from BEFORE
+    the jump. Measured the same day - four jumps interleaved with four reads gave four identical
+    pre-jump values and no error, which reads exactly like a parameter that never moves. Use one
+    call per position when sampling a running transport. Observing this fires very often; a
+    listener on it can flood the event ring buffer (docs/protocol.md section 5.11). Read
+    verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.last_event_time
+  path: song.last_event_time
+  access: [get, observe]
+  kind: float
+  unit: beats
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Beat position of the last event in the arrangement, i.e. where the material ends.
+    Read-only, and the closest thing the LOM offers to "song length" - silence after the
+    last clip is not counted.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.song_length
+  path: song.song_length
+  access: [get]
+  kind: float
+  unit: beats
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Arrangement length in beats. Compare song.last_event_time, which stops at the last
+    event rather than at the end of the arrangement.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.is_counting_in
+  path: song.is_counting_in
+  access: [get, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    True while Live runs the metronome count-in before recording. Read-only. A write
+    issued during the count-in is not lost, but it lands before the recording starts,
+    which is rarely what the caller meant.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.count_in_duration
+  path: song.count_in_duration
+  access: [get, observe]
+  kind: enum
+  enum: [0, 1, 2, 3]
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  means:
+    "0": >-
+      none - from Live's UI order, NOT measured: the property has no setter, so the other
+      values cannot be reached from here
+    "1": >-
+      one bar - MEASURED 2026-08-31 against Live 12.4.5 by reading the property while
+      Preferences showed 'Vorzaehlen: 1 Bar'
+    "2": >-
+      two bars - from Live's UI order, NOT measured
+    "3": >-
+      four bars - from Live's UI order, NOT measured
+  doc: >-
+    Count-in length before recording, as an index. READ-ONLY: this row granted 'set' until
+    2026-08-31, when a write answered not_settable - "property of 'Song' object has no
+    setter" - measured against Live 12.4.5. So the only value that can be established is
+    whichever one the preference happens to hold, and the rest of the mapping stays on
+    Live's UI order rather than on a measurement. One point of it is now pinned: with
+    Preferences showing 1 Bar the property read 1.
+    Read verified 2026-08-29 against Live 12.4.5; the write was attempted 2026-08-31 and
+    Live refused it.
+
+- id: song.metronome
+  path: song.metronome
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The click. Audible immediately, unlike almost everything else in this catalog, which
+    makes it a good smoke test for "did anything at all reach Live" when a human is
+    sitting in front of the machine.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.start_playing
+  path: song
+  access: [call]
+  method: start_playing
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Start the transport from the current start marker. Returns nothing; confirm with
+    song.is_playing. Not the same as song.continue_playing, which resumes from where it
+    stopped. Call verified 2026-08-30 against Live 12.4.5:
+    invoked and it returned without error. The set was restored afterwards where the call
+    had any effect.
+
+- id: song.stop_playing
+  path: song
+  access: [call]
+  method: stop_playing
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Stop the transport. Returns nothing; confirm with song.is_playing. Whether the
+    playhead returns to the start marker depends on a Live preference we cannot read
+    through the LOM, so read song.current_song_time afterwards rather than assuming. Call
+    verified 2026-08-30 against Live 12.4.5: invoked and it
+    returned without error. The set was restored afterwards where the call had any effect.
+
+- id: song.continue_playing
+  path: song
+  access: [call]
+  method: continue_playing
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Resume from the current playhead instead of from the start marker. Returns nothing;
+    confirm with song.is_playing. Call verified 2026-08-30 against Live 12.4.5:
+    invoked and it returned without error. The set was restored afterwards
+    where the call had any effect.
+
+- id: song.play_selection
+  path: song
+  access: [call]
+  method: play_selection
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Play the current arrangement selection. Returns nothing. Depends on a selection made
+    in the GUI or through song.view - with nothing selected this is expected to be a no-op
+    that still reports success, which is the failure mode this whole project is built
+    around (docs/architecture.md, "read-back as a principle"). Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted
+    for the purpose. Called with no arguments.
+
+- id: song.stop_all_clips
+  path: song
+  access: [call]
+  method: stop_all_clips
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Stop every playing session clip on every track. Returns nothing; confirm by reading
+    track.playing_slot_index, which should go to -1 everywhere. Takes an optional boolean
+    argument for quantised stopping (default true), so with the global quantisation set to
+    a bar the clips keep playing until the bar line - a read immediately afterwards will
+    still show them running. Call verified 2026-08-30 against Live 12.4.5:
+    invoked and it returned without error. The set was restored afterwards
+    where the call had any effect.
+  args:
+    - {name: quantized, kind: bool, required: false}
+
+- id: song.jump_by
+  path: song
+  access: [call]
+  method: jump_by
+  kind: object
+  unit: beats
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Move the playhead by a relative number of beats; negative moves back. Returns nothing;
+    confirm with song.current_song_time. Setting song.current_song_time directly is
+    preferable when an absolute position is known, because a relative jump on a moving
+    transport lands where the transport happened to be. Call verified 2026-08-30 against
+    Live 12.4.5, on a scratch track created and deleted for the
+    purpose. It ran and did what it says.
+  args:
+    - {name: beats, kind: float, required: true}
+
+- id: song.scrub_by
+  path: song
+  access: [call]
+  method: scrub_by
+  kind: object
+  unit: beats
+  destructive: false
+  verify: none
+  status: broken
+  doc: >-
+    Scrub the playhead by a relative number of beats, i.e. jump while keeping
+    playback audible. Returns nothing. What the call does has never been measured
+    from here.
+    REFUSED by this script's allowlist, by design: it scrubs the transport with nothing that
+    ends the gesture. Clip.scrub IS allowed, because Clip.stop_scrub always ends it. Measured
+    2026-08-30 against Live 12.4.5 through lom_describe's allowed_methods.
+  args:
+    - {name: beats, kind: float, required: true}
+
+# ---------------------------------------------------------------------------
+# Song - loop, punch, recording
+# ---------------------------------------------------------------------------
+
+- id: song.loop
+  path: song.loop
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Arrangement loop on or off. The loop brackets themselves are song.loop_start and
+    song.loop_length; switching this on without setting them loops whatever range Live
+    happens to hold, which is often the whole set.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.loop_start
+  path: song.loop_start
+  access: [get, set, observe]
+  kind: float
+  unit: beats
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Left arrangement loop bracket, in beats from the start. Set this before
+    song.loop_length: Live is expected to keep the end fixed and adjust the length when
+    you move the start, so the order of two writes changes the result. Which of the two
+    Live treats as authoritative is not measured.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.loop_length
+  path: song.loop_length
+  access: [get, set, observe]
+  kind: float
+  unit: beats
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Arrangement loop length in beats - a length, not an end position. A 16 bar loop in 4/4
+    is 64.0 here. There is no loop_end property; the end is loop_start plus loop_length
+    and has to be computed.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.punch_in
+  path: song.punch_in
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Start arrangement recording at the left loop bracket. Only has an effect when the loop
+    brackets are where you want them - it reads back as true regardless, so a correct
+    read-back here does not mean recording will start where you think.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.punch_out
+  path: song.punch_out
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Stop arrangement recording at the right loop bracket. Same caveat as song.punch_in:
+    the flag reads back happily with the brackets in the wrong place.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.record_mode
+  path: song.record_mode
+  access: [get, set, observe]
+  kind: enum
+  enum: [0, 1]
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Arrangement record arm: 1 recording, 0 not. Exposed as an integer flag rather than a
+    bool in the LOM; whether Live coerces a JSON true is unverified, so send 0 or 1.
+    Arming this while the transport runs starts recording immediately on every armed track
+    - destructive to the arrangement in practice, even though the property itself only
+    stores a flag.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.session_record
+  path: song.session_record
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The session record button. With armed tracks and a playing transport this starts
+    writing into session slots. Read song.session_record_status rather than this flag to
+    find out what Live is actually doing - this one reports the button, not the state
+    machine.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.session_record_status
+  path: song.session_record_status
+  access: [get, observe]
+  kind: enum
+  enum: [0, 1, 2]
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  means:
+    "0": >-
+      off
+    "1": >-
+      on
+    "2": >-
+      transition - on its way between the two: neither off nor recording yet
+  doc: >-
+    Read-only session recording state: 0 off, 1 transition (armed and waiting for the next
+    quantisation point), 2 recording. State 1 is the one that makes a naive check wrong -
+    the button is on, nothing is being recorded yet, and both facts are true.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+    Value names read off Live.Song.SessionRecordStatus through the enum_names handler
+    (docs/protocol.md section 5.12), measured 2026-08-31 against Live 12.4.5 - not transcribed
+    from a reference. Cycling 74's LOM documentation agrees.
+
+- id: song.session_automation_record
+  path: song.session_automation_record
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether parameter moves made while a session clip plays are recorded into that clip's
+    envelopes. Relevant to this server specifically: with this on, a lom_set on a mixer or
+    device parameter can be written into a clip envelope instead of being a plain value
+    change, and the next loop pass will overwrite what you just set. That interaction has
+    not been measured.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.arrangement_overdub
+  path: song.arrangement_overdub
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    MIDI overdub in the arrangement: recorded notes are added to existing arrangement
+    clips instead of replacing them. Off means a new take replaces what was there - which
+    is data loss on a running production, so read this before arming anything.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.overdub
+  path: song.overdub
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Legacy overdub flag from older Live versions. It is present on 12.4.5; whether it is
+    an alias of song.arrangement_overdub or a flag of its own has not been measured.
+    Prefer song.arrangement_overdub.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.trigger_session_record
+  path: song
+  access: [call]
+  method: trigger_session_record
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: broken
+  doc: >-
+    Start a session recording of a fixed length in beats, as the fixed-length
+    recording button does. Returns nothing; confirm with
+    song.session_record_status. Takes one optional float argument (the length);
+    without it Live records until stopped. What the call does has never been
+    measured from here.
+    REFUSED by this script's allowlist, by design: latching state, and a begin without an end
+    leaves Live recording with no reliable way to notice from here. Measured 2026-08-30
+    against Live 12.4.5 through lom_describe's allowed_methods.
+  args:
+    - {name: record_length, kind: float, required: false}
+
+- id: song.capture_midi
+  path: song
+  access: [call]
+  method: capture_midi
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Capture what was just played into a new clip, as Live's Capture MIDI button does.
+    Returns nothing. Only meaningful when Live actually has something in its capture
+    buffer - see song.can_capture_midi, and check it first, because a capture with an
+    empty buffer is expected to report success and produce nothing. Call verified
+    2026-08-30 against Live 12.4.5, on a scratch track created
+    and deleted for the purpose. It ran and did what it says. Captures recently played
+    MIDI into a clip; harmless on a track nobody played into.
+
+- id: song.can_capture_midi
+  path: song.can_capture_midi
+  access: [get, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether Live currently has material in its MIDI capture buffer. Read-only, and the
+    only honest pre-check for song.capture_midi.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.capture_and_insert_scene
+  path: song
+  access: [call]
+  method: capture_and_insert_scene
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Capture the currently playing session clips into a new scene below the selected one.
+    Returns nothing; confirm by reading song.scenes and the new scene's clip_slots. This
+    shifts every scene index after the insertion point - re-read scene indices afterwards
+    rather than reusing them. Call verified 2026-08-30 against Live 12.4.5, on a scratch
+    track created and deleted for the purpose.
+
+- id: song.back_to_arranger
+  path: song.back_to_arranger
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    True when session clips are currently overriding arrangement playback (the lit Back to
+    Arrangement button). Setting it to false hands control back to the arrangement; Live
+    sets it to true by itself when a clip is launched. Writing true is expected to be
+    meaningless - unverified.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.re_enable_automation_enabled
+  path: song.re_enable_automation_enabled
+  access: [get, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    True when at least one automated parameter has been moved by hand and its automation
+    is therefore overridden. Read-only. A non-obvious cause of "the automation is written
+    but nothing moves" - the value is stored, the playback is overridden, and the read-
+    back proves the wrong half (docs/protocol.md section 10).
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.re_enable_automation
+  path: song
+  access: [call]
+  method: re_enable_automation
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Re-enable overridden automation globally, as the Re-Enable Automation button does.
+    Returns nothing; confirm with song.re_enable_automation_enabled going false. Discards
+    the manual override, not the automation. Call verified 2026-08-30 against Live 12.4.5:
+    invoked and it returned without error. The set was restored
+    afterwards where the call had any effect.
+
+- id: song.exclusive_arm
+  path: song.exclusive_arm
+  access: [get, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether arming one track disarms the others (a Live preference, mirrored onto the
+    song). Matters when arming tracks in a batch: with this on, a loop that arms five
+    tracks leaves exactly one armed and reports five successes. Expected to be read-only.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.exclusive_solo
+  path: song.exclusive_solo
+  access: [get, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether soloing one track unsolos the others. Same batch trap as song.exclusive_arm.
+    Expected to be read-only.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+# ---------------------------------------------------------------------------
+# Song - quantisation and groove
+# ---------------------------------------------------------------------------
+
+- id: song.clip_trigger_quantization
+  path: song.clip_trigger_quantization
+  access: [get, set, observe]
+  kind: enum
+  enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  means:
+    "0": >-
+      q_no_q - off - a clip launches the moment it is fired
+    "1": >-
+      q_8_bars
+    "2": >-
+      q_4_bars
+    "3": >-
+      q_2_bars
+    "4": >-
+      q_bar - one bar
+    "5": >-
+      q_half - 1/2
+    "6": >-
+      q_half_triplet - 1/2 triplet
+    "7": >-
+      q_quarter - 1/4
+    "8": >-
+      q_quarter_triplet - 1/4 triplet
+    "9": >-
+      q_eight - 1/8
+    "10": >-
+      q_eight_triplet - 1/8 triplet
+    "11": >-
+      q_sixtenth - 1/16, and that is Live's own spelling, one letter short
+    "12": >-
+      q_sixtenth_triplet - 1/16 triplet
+    "13": >-
+      q_thirtytwoth - 1/32
+  doc: >-
+    Global launch quantisation, as an index into Live's Quantization enum: 0 none, 1 eight bars,
+    2 four bars, 3 two bars, 4 one bar, 5 1/2, 6 1/2 triplet, 7 1/4, 8 1/4 triplet, 9 1/8, 10
+    1/8 triplet, 11 1/16, 12 1/16 triplet, 13 1/32. This is why a fired clip can take up to a
+    bar to start and why a read straight after firing shows nothing playing. Read verified
+    2026-08-29 against Live 12.4.5; a write was NOT attempted on this row. Value names read off
+    Live.Song.Quantization through the enum_names handler (docs/protocol.md section 5.12),
+    measured 2026-08-31 against Live 12.4.5 - not transcribed from a reference. Cycling 74's LOM
+    documentation agrees. This enum is NOT the one clip.launch_quantization uses: that property
+    reads Live.Clip.ClipLaunchQuantization, whose values run one HIGHER for every shared member
+    and whose spellings differ (q_eighth, q_sixteenth, q_thirtysecond there against q_eight,
+    q_sixtenth, q_thirtytwoth here). Do not carry a value from one to the other.
+
+- id: song.midi_recording_quantization
+  path: song.midi_recording_quantization
+  access: [get, set, observe]
+  kind: enum
+  enum: [0, 1, 2, 3, 4, 5, 6, 7, 8]
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  means:
+    "0": >-
+      rec_q_no_q - off
+    "1": >-
+      rec_q_quarter - 1/4
+    "2": >-
+      rec_q_eight - 1/8
+    "3": >-
+      rec_q_eight_triplet - 1/8 triplet
+    "4": >-
+      rec_q_eight_eight_triplet - 1/8 and 1/8 triplet together
+    "5": >-
+      rec_q_sixtenth - 1/16
+    "6": >-
+      rec_q_sixtenth_triplet - 1/16 triplet
+    "7": >-
+      rec_q_sixtenth_sixtenth_triplet - 1/16 and 1/16 triplet together
+    "8": >-
+      rec_q_thirtysecond - 1/32
+  doc: >-
+    Quantisation applied to incoming MIDI while recording, as an index into Live's
+    RecordingQuantization enum: 0 none, 1 1/4, 2 1/8, 3 1/8 triplet, 4 1/8 and triplet, 5 1/16,
+    6 1/16 triplet, 7 1/16 and triplet, 8 1/32. Affects recording only - notes written through
+    notes_set are stored exactly as sent. Read verified 2026-08-29 against Live 12.4.5; a write
+    was NOT attempted on this row. Value names read off Live.Song.RecordingQuantization through
+    the enum_names handler (docs/protocol.md section 5.12), measured 2026-08-31 against Live
+    12.4.5 - not transcribed from a reference. Cycling 74's LOM documentation agrees.
+
+- id: song.groove_amount
+  path: song.groove_amount
+  access: [get, set, observe]
+  kind: float
+  range: [0.0, 1.0]
+  unit: normalized
+  display: percent
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Global groove amount, scaling every clip's assigned groove at once. Expected to run
+    0.0 to 1.0 while Live's UI shows 0 to 130 percent, so the top of the range is
+    unverified and a write of 1.0 may or may not be the UI maximum. The Groove Pool as a
+    whole is listed as unprobed in docs/architecture.md, "the catalog".
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.swing_amount
+  path: song.swing_amount
+  access: [get, set, observe]
+  kind: float
+  range: [0.0, 1.0]
+  unit: normalized
+  display: percent
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Swing applied by record quantisation, not the same control as song.groove_amount.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.groove_pool
+  path: song.groove_pool
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The Groove Pool object, as a handle. Its `grooves` list holds the loaded grooves;
+    assigning one to a clip is a clip property, not a song one. Whole area is unprobed
+    (docs/architecture.md, "the catalog") - use lom_describe on this path to find out what the
+    installed Live actually offers before writing anything.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.groove_pool.grooves
+  path: song.groove_pool.grooves
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The grooves currently in the pool, as handles with a `name` each. Read-only from here;
+    grooves are added by dragging a file into the pool, which the LOM does not expose.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.nudge_down
+  path: song.nudge_down
+  access: [get, set]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The tempo nudge-down button. It behaves as a momentary control: set it true, then
+    false again, and the tempo drifts down for as long as it was true. Over a serial
+    protocol the "how long" is the round-trip time, which makes the effect unpredictable -
+    adjust song.tempo instead unless you are deliberately riding a beatmatch. The
+    momentary behaviour is described from the LOM and has not been measured here.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.nudge_up
+  path: song.nudge_up
+  access: [get, set]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The tempo nudge-up button, with the same momentary behaviour and the same caveat as
+    song.nudge_down. Leaving it true because a later write failed leaves the tempo running
+    away - always pair the two writes in one lom_batch.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+# ---------------------------------------------------------------------------
+# Song - key and scale (Live 12)
+# ---------------------------------------------------------------------------
+
+- id: song.scale_name
+  path: song.scale_name
+  access: [get, set, observe]
+  kind: str
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Name of the song scale, e.g. "Minor" or "Dorian". Live 12 only - on Live 11 this path
+    is expected to return no_such_path, which is itself the version check. Live accepts
+    only the scale names it knows; an unknown string is expected to be rejected rather
+    than stored, but that is unverified and the read-back is what tells you.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.root_note
+  path: song.root_note
+  access: [get, set, observe]
+  kind: int
+  range: [0, 11]
+  unit: semitones
+  destructive: false
+  verify: read_back
+  status: verified
+  means:
+    "0": >-
+      C (pitch class, transcribed from this row: 0 = C through 11 = B)
+    "1": >-
+      C#/Db (pitch class, transcribed from this row: 0 = C through 11 = B)
+    "2": >-
+      D (pitch class, transcribed from this row: 0 = C through 11 = B)
+    "3": >-
+      D#/Eb (pitch class, transcribed from this row: 0 = C through 11 = B)
+    "4": >-
+      E (pitch class, transcribed from this row: 0 = C through 11 = B)
+    "5": >-
+      F (pitch class, transcribed from this row: 0 = C through 11 = B)
+    "6": >-
+      F#/Gb (pitch class, transcribed from this row: 0 = C through 11 = B)
+    "7": >-
+      G (pitch class, transcribed from this row: 0 = C through 11 = B)
+    "8": >-
+      G#/Ab (pitch class, transcribed from this row: 0 = C through 11 = B)
+    "9": >-
+      A (pitch class, transcribed from this row: 0 = C through 11 = B)
+    "10": >-
+      A#/Bb (pitch class, transcribed from this row: 0 = C through 11 = B)
+    "11": >-
+      B (pitch class, transcribed from this row: 0 = C through 11 = B)
+  doc: >-
+    Root note of the song scale as a pitch class, 0 = C through 11 = B. Live 12 only. This
+    is the scale root shown in the control bar, not a transposition - changing it does not
+    move a single existing note.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.scale_intervals
+  path: song.scale_intervals
+  access: [get, observe]
+  kind: list
+  unit: semitones
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The semitone offsets of the current scale from its root, e.g. [0, 2, 3, 5, 7, 8, 10]
+    for natural minor. Live 12 only, read-only: pick a scale by writing song.scale_name,
+    not by writing this. Useful to the music layer as ground truth for what Live believes
+    the key is.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.scale_mode
+  path: song.scale_mode
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether Live 12's scale awareness is active, i.e. whether editors snap to the song
+    scale. It changes what the GUI does to a human's edits; it does not filter notes
+    written through notes_set.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+# ---------------------------------------------------------------------------
+# Song - undo
+# ---------------------------------------------------------------------------
+
+- id: song.undo
+  path: song
+  access: [call]
+  method: undo
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Undo one step in Live's own undo history. Returns nothing; check song.can_undo before
+    and after. It is the strongest safety net this server can have, but it is not a backup: 
+    it does not survive closing the set, and it undoes the human's last action just as readily 
+    as ours.
+    Measured 2026-08-29 against Live 12.4.5: renamed a clip, called undo(), the name
+    reverted exactly.
+    The return value is Live's own description of what it undid - and it is LOCALISED.
+    Measured 2026-08-30 against Live 12.4.5 with Live's UI in German: undoing a device load
+    answered 'Geraet einfuegen widerrufen' (Undo Insert Device), and an earlier one answered
+    'Custom Action widerrufen'. Read it, never branch on it: an English build returns
+    different words for the same event. It is also the only signal of SCOPE - one undo
+    reverted three separate tool calls in one step, measured the same day - and since a call
+    has no read-back, the scope has to be settled by reading the set afterwards.
+
+- id: song.redo
+  path: song
+  access: [call]
+  method: redo
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Redo one undone step. Returns nothing; check song.can_redo. Any new edit after an undo
+    is expected to discard the redo branch, as in every DAW. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted
+    for the purpose. Called with no arguments.
+
+- id: song.can_undo
+  path: song
+  access: [call]
+  method: can_undo
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether an undo step is available. A method, not a property, which is why it is a
+    call. Calling song.undo with nothing to undo is expected to be a harmless no-op, but
+    "expected" is not "measured" - ask first.
+    Measured 2026-08-29 against Live 12.4.5: returned True on a set with edit history.
+
+- id: song.can_redo
+  path: song
+  access: [call]
+  method: can_redo
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether a redo step is available. A method, not a property.
+    Measured 2026-08-29 against Live 12.4.5: returned False with nothing undone.
+
+- id: song.begin_undo_step
+  path: song
+  access: [call]
+  method: begin_undo_step
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: broken
+  doc: >-
+    Open an undo group, so that everything until song.end_undo_step becomes one
+    step in Live's history. Returns nothing. The nearest thing to a transaction
+    this system has, and it is not one: lom_batch cannot roll back either
+    (docs/protocol.md section 5.7). It only makes a human's single undo tidy.
+    REFUSED by this script's allowlist, by design, and therefore never callable: a begin
+    without its end leaves Live accumulating one open undo step for the rest of the session
+    and nothing here can notice. Measured 2026-08-30 against Live 12.4.5 - the method is in
+    Song's method list and absent from the allowed_methods lom_describe reports. One undoable
+    unit of work is a single lom_batch instead.
+
+- id: song.end_undo_step
+  path: song
+  access: [call]
+  method: end_undo_step
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: broken
+  doc: >-
+    Close the undo group opened by song.begin_undo_step. Returns nothing. An
+    unclosed group after an error is expected to leave Live's undo history in an
+    odd state - pair them in one lom_batch, or not at all.
+    REFUSED by this script's allowlist, by design - see song.begin_undo_step. Measured
+    2026-08-30 against Live 12.4.5 through lom_describe's allowed_methods.
+
+# ---------------------------------------------------------------------------
+# Song - creating and deleting structure
+# ---------------------------------------------------------------------------
+
+- id: song.create_midi_track
+  path: song
+  access: [call]
+  method: create_midi_track
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Insert a MIDI track. Takes one index argument; -1 means "at the end", which
+    is the only value that does not renumber existing tracks. What it returns was
+    not recorded; confirm by reading song.tracks. Every insertion
+    before an existing track shifts that track's index, so cached indices are
+    stale afterwards.
+    Call verified 2026-08-30 against Live 12.4.5: signature create_midi_track(double, double).
+    Called with index 4 on a set of four tracks; the new track read back at that index with
+    has_midi_input true, and was deleted again.
+  args:
+    - {name: index, kind: int, required: false}
+
+- id: song.create_audio_track
+  path: song
+  access: [call]
+  method: create_audio_track
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Insert an audio track. Same index semantics and the same index-shifting
+    warning as song.create_midi_track: -1 appends, anything else renumbers.
+    Call verified 2026-08-30 against Live 12.4.5: called with index 5; the new track read back
+    with has_audio_input true, and was deleted again.
+  args:
+    - {name: index, kind: int, required: false}
+
+- id: song.create_return_track
+  path: song
+  access: [call]
+  method: create_return_track
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Append a return track. A fresh set has two returns and the median in the measured
+    corpus is five, so most sets need more than the default.
+    Adding a return also adds a send to every track, which changes the length of every
+    mixer_device.sends list. Call verified 2026-08-30 against Live 12.4.5,
+    on a scratch track created and deleted for the purpose. It ran and did
+    what it says.
+
+- id: song.duplicate_track
+  path: song
+  access: [call]
+  method: duplicate_track
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Duplicate the track at the given index, inserting the copy directly after it. Returns
+    nothing; confirm by reading song.tracks. Everything after the insertion point shifts
+    by one - re-read indices, do not compute them. Call verified 2026-08-30 against Live
+    12.4.5, on a scratch track created and deleted for the
+    purpose. It ran and did what it says.
+  args:
+    - {name: index, kind: int, required: true}
+
+- id: song.delete_track
+  path: song
+  access: [call]
+  method: delete_track
+  kind: object
+  unit: none
+  destructive: true
+  verify: none
+  status: verified
+  doc: >-
+    Delete the track at the given index, with everything on it. Measured: Live refuses to
+    delete the last remaining track and answers "Couldn't delete track." - a real error,
+    not a silent one. When clearing a default set, delete from the
+    back forwards, or the indices shift out from under the loop, and leave the last
+    default track until your own tracks exist. Call verified 2026-08-30 against Live
+    12.4.5, on a scratch track created and deleted for the
+    purpose. It ran and did what it says.
+  args:
+    - {name: index, kind: int, required: true}
+
+- id: song.delete_return_track
+  path: song
+  access: [call]
+  method: delete_return_track
+  kind: object
+  unit: none
+  destructive: true
+  verify: none
+  status: verified
+  doc: >-
+    Delete the return track at the given index. Every send that pointed at it disappears
+    from every track's mixer_device.sends list, so send indices captured before the call
+    are wrong afterwards. Deleting from the back forwards is the only safe order. Call
+    verified 2026-08-30 against Live 12.4.5, on a scratch track
+    created and deleted for the purpose. It ran and did what it says.
+  args:
+    - {name: index, kind: int, required: true}
+
+- id: song.create_scene
+  path: song
+  access: [call]
+  method: create_scene
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Insert a scene; the argument is the index and -1 means "at the end". Measured
+    consequence of not having this: a fresh set has eight scenes, so slot 8 raises "Clip
+    index out of range", and through-composed material fills eight slots immediately.
+    Extend at the start of a build, not when the error appears. Also note
+    that clips sharing a session slot share their automation. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted
+    for the purpose. It ran and did what it says.
+  args:
+    - {name: index, kind: int, required: false}
+
+- id: song.duplicate_scene
+  path: song
+  access: [call]
+  method: duplicate_scene
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Duplicate the scene at the given index, inserting the copy after it. The copies are
+    real clips, not references, so their envelopes are independent - unlike two
+    arrangement copies of one session clip, which carry the same stamped envelope
+    (measured). Call verified 2026-08-30 against Live 12.4.5,
+    on a scratch track created and deleted for the purpose. It ran and did
+    what it says.
+  args:
+    - {name: index, kind: int, required: true}
+
+- id: song.delete_scene
+  path: song
+  access: [call]
+  method: delete_scene
+  kind: object
+  unit: none
+  destructive: true
+  verify: none
+  status: verified
+  doc: >-
+    Delete the scene at the given index, with every clip in it, across all tracks. Live is
+    expected to refuse to delete the last scene, as it does for the last track; deleting
+    the last scene was not tried. Delete from the back forwards. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted for the
+    purpose. It ran and did what it says.
+  args:
+    - {name: index, kind: int, required: true}
+
+- id: song.move_device
+  path: song
+  access: [call]
+  method: move_device
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Move a device to another position or chain. Live 11 added
+    Song.move_device(device, target_chain, position). It takes objects rather than
+    indices, so the device and the target chain travel as path references
+    (docs/protocol.md section 5.5). Call verified 2026-08-30 against Live 12.4.5, on a
+    scratch track created and deleted for the purpose. It ran
+    and did what it says. Measured on a five-device chain: ['Eq8','Compressor2',...]
+    became ['Compressor2','Eq8',...]. This retracts the long-standing claim that device
+    order can only be changed by dragging - see docs/limits.md.
+  args:
+    - {name: device, kind: str, required: true}
+    - {name: target_chain, kind: str, required: true}
+    - {name: position, kind: int, required: true}
+
+# ---------------------------------------------------------------------------
+# Song - cue points (locators)
+# ---------------------------------------------------------------------------
+
+- id: song.cue_points
+  path: song.cue_points
+  access: [get, observe]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The locators in the arrangement, as handles. What Live's UI calls a Locator is a
+    CuePoint in the LOM - see the cue.* rows for their properties. Read-only as a list:
+    locators are created with song.set_or_delete_cue, not by appending here. Sorted by
+    time, expected but unverified.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.set_or_delete_cue
+  path: song
+  access: [call]
+  method: set_or_delete_cue
+  kind: object
+  unit: none
+  destructive: true
+  verify: none
+  status: verified
+  doc: >-
+    Toggle a locator at the current playhead: creates one if there is none there, deletes the
+    existing one if there is. Returns nothing; confirm by reading song.cue_points. Marked
+    destructive because it is a toggle - calling it twice is not idempotent, it removes what the
+    first call made. Set song.current_song_time first; there is no position argument. Call
+    verified 2026-08-30 against Live 12.4.5, on a scratch track created and deleted for the
+    purpose. It ran and did what it says.
+
+- id: song.jump_to_next_cue
+  path: song
+  access: [call]
+  method: jump_to_next_cue
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Move the playhead to the next locator after the current position. Returns nothing;
+    confirm with song.current_song_time. A no-op past the last locator, expected but
+    unverified. Call verified 2026-08-30 against Live 12.4.5:
+    invoked and it returned without error. The set was restored afterwards where the call
+    had any effect.
+
+- id: song.jump_to_prev_cue
+  path: song
+  access: [call]
+  method: jump_to_prev_cue
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Move the playhead to the previous locator. Returns nothing; confirm with
+    song.current_song_time. Call verified 2026-08-30 against Live 12.4.5:
+    invoked and it returned without error. The set was restored afterwards
+    where the call had any effect.
+
+# ---------------------------------------------------------------------------
+# Song - collections and sub-objects
+# ---------------------------------------------------------------------------
+
+- id: song.tracks
+  path: song.tracks
+  access: [get, observe]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    All tracks in the set, in order, as handles; return tracks and the master are not in
+    this list. Indices here are what every track.* row's {track} parameter means. Measured
+    trap: iterating this list unguarded raises at the first group track, because groups
+    have no arm state and no arrangement clips - check can_be_armed and is_foldable before
+    touching either (docs/protocol.md section 6). And grouping tracks in the
+    GUI renumbers everything after the group, so re-read this list rather than caching
+    indices.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.visible_tracks
+  path: song.visible_tracks
+  access: [get, observe]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Tracks currently visible, i.e. song.tracks minus the ones hidden inside folded groups.
+    The indices here do NOT match song.tracks indices, and using one where the other is
+    meant addresses the wrong track while reporting success. Every {track} parameter in
+    this catalog means a song.tracks index.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.return_tracks
+  path: song.return_tracks
+  access: [get, observe]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The return tracks, as handles, in the order their sends appear on every track. Indices
+    here are what the return.* rows in 20-track.yaml mean by {ret}. Returns have no arm
+    state; iterating them as if they were normal tracks raises "Main and Return Tracks
+    have no 'Arm' state!" (measured).
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.master_track
+  path: song.master_track
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The master track, as a handle. Not part of song.tracks and not indexable - the
+    master.* rows in 20-track.yaml address it by name. Live 12 renamed it to Main in the
+    UI while the LOM property stayed master_track.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.scenes
+  path: song.scenes
+  access: [get, observe]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    All scenes, as handles. Indices here are what the scene.* rows mean by {scene}. A
+    fresh set has eight; slot 8 raises "Clip index out of range" (measured) until
+    song.create_scene has been called.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.view
+  path: song.view
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The song's view object, as a handle. It is also a resolver root in its own right
+    (docs/protocol.md section 6), so the view.* rows below can be addressed either way.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: song.appointed_device
+  path: song.appointed_device
+  access: [get, set, observe]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The device the blue hand is on, i.e. the one control surfaces follow. Settable in the
+    LOM, but the value is a Device object, not JSON - setting it over this wire is
+    expected to fail with type_error unless the script grows a handle-resolving shim for
+    writes. The row exists to find that out.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+# ---------------------------------------------------------------------------
+# Song.View - selection and detail views
+# ---------------------------------------------------------------------------
+
+- id: view.selected_track
+  path: song.view.selected_track
+  access: [get, set, observe]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The selected track, as a handle. Reading it is how you find out what a human is
+    looking at; writing it needs a Track object rather than an index, so a plain JSON
+    write is expected to fail with type_error (docs/protocol.md section 7). Whether the
+    script can accept an index shim here is not measured.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: view.selected_track_devices
+  path: song.view.selected_track.devices
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The device chain of whichever track is selected, without needing its index. This
+    exists because the handle Live returns for view.selected_track carries the path
+    'song.view.selected_track' - the PROPERTY path, not 'song.tracks[N]' - so an index
+    cannot be read off it (measured 2026-09-01 against Live 12.4.5, and a first attempt
+    to parse one out of the handle silently produced nothing). Following the selection
+    itself is also the honest reading for a browser load, which targets whatever is
+    selected rather than an index the caller believes is selected. Read verified
+    2026-09-01 against Live 12.4.5 on a 51-track set; a write is not offered, the row
+    is get-only.
+
+- id: view.selected_scene
+  path: song.view.selected_scene
+  access: [get, set, observe]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The selected scene, as a handle. Same object-versus-JSON limitation as
+    view.selected_track. Matters because song.capture_and_insert_scene inserts relative to
+    this selection.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: view.detail_clip
+  path: song.view.detail_clip
+  access: [get, set, observe]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The clip shown in the detail view, as a handle. Reading it tells you which clip a
+    human is editing - worth checking before writing notes into it, since notes_set
+    replaces by default (docs/protocol.md section 5.8).
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: view.highlighted_clip_slot
+  path: song.view.highlighted_clip_slot
+  access: [get, set, observe]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The selected clip slot in the session grid, as a handle. The target of keyboard-driven
+    actions in the GUI; irrelevant to path-addressed writes, which always name their slot
+    explicitly.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: view.selected_parameter
+  path: song.view.selected_parameter
+  access: [get, observe]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The parameter currently selected in the GUI, as a handle. Live 11 and later.
+    Read-only, and the quickest way to ask a human "which knob do you mean" without making
+    them name a path.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: view.follow_song
+  path: song.view.follow_song
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the arrangement view scrolls to follow the playhead. Cosmetic, but it decides
+    whether a human watching the screen sees what a batch just changed.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: view.draw_mode
+  path: song.view.draw_mode
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Draw mode (the pencil) on or off. Live 11 and later. Affects GUI editing only - it
+    does not change how notes_set or automation_write behave.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+- id: view.select_device
+  path: song.view
+  access: [call]
+  method: select_device
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Select a device in the GUI, so the human sees the one being talked about.
+    Returns nothing. Takes a Device object, not an index; the device is named
+    here by its path, and the script resolves it.
+    Call verified 2026-08-30 against Live 12.4.5: signature select_device(ADevice, bool
+    ShouldAppointDevice=True). Passed a device by path; song.appointed_device read back as
+    that device.
+  args:
+    - {name: device, kind: str, required: true}
+
+# ---------------------------------------------------------------------------
+# Scene - song.scenes[{scene}]
+# ---------------------------------------------------------------------------
+
+- id: scene.name
+  path: song.scenes[{scene}].name
+  access: [get, set, observe]
+  kind: str
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Scene name. An unnamed scene reads back as an empty string, not as its number - the
+    number a human sees in the GUI is the index plus one and is not stored anywhere.
+    Naming scenes after song sections is what makes an arrangement readable later.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.color
+  path: song.scenes[{scene}].color
+  access: [get, set, observe]
+  kind: int
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Scene colour as a packed integer, 0xRRGGBB. Live is expected to snap an arbitrary
+    value to the nearest entry of its fixed palette, so the read-back will often differ
+    from what was sent - that is a clamp, not a failure (docs/protocol.md section 5.4).
+    Use scene.color_index to pick a palette entry directly.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.color_index
+  path: song.scenes[{scene}].color_index
+  access: [get, set, observe]
+  kind: int
+  range: [0, 69]
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Scene colour as an index into Live's palette. The upper bound of 69 comes from Live's
+    70-colour palette and is read from the UI, not measured against the LOM. Setting -1 is
+    expected to mean "no colour", which was not tried.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.tempo
+  path: song.scenes[{scene}].tempo
+  access: [get, set, observe]
+  kind: float
+  range: [-1.0, 999.0]
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  means:
+    "-1.0": >-
+      no tempo set for this scene, which is why the range starts below the legal tempo
+      minimum. On Live 11+ scene.tempo_enabled is the clearer switch
+  doc: >-
+    Per-scene tempo in BPM: firing the scene sets song.tempo to this value. A value of
+    -1.0 means "no tempo set", which is why the range starts below the legal tempo
+    minimum. On Live 11 and later scene.tempo_enabled is the clearer switch. Which one
+    wins if they disagree is not measured.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.tempo_enabled
+  path: song.scenes[{scene}].tempo_enabled
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this scene's tempo is applied when it fires. Live 11 and later. On older
+    versions the -1.0 convention in scene.tempo is the only switch there is.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.time_signature_numerator
+  path: song.scenes[{scene}].time_signature_numerator
+  access: [get, set, observe]
+  kind: int
+  range: [1, 99]
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Per-scene time signature numerator, applied to the song when the scene fires. Live 11
+    and later. A value of -1 is expected to mean "not set", paralleling scene.tempo.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.time_signature_denominator
+  path: song.scenes[{scene}].time_signature_denominator
+  access: [get, set, observe]
+  kind: int
+  range: [1, 16]
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Per-scene time signature denominator; powers of two only, as for
+    song.signature_denominator. Live 11 and later.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.time_signature_enabled
+  path: song.scenes[{scene}].time_signature_enabled
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this scene's time signature is applied when it fires. Live 11 and later.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.is_empty
+  path: song.scenes[{scene}].is_empty
+  access: [get, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    True when no track has a clip in this scene. Read-only, and the cheap way to find the
+    first free scene without walking every clip slot on every track.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.is_triggered
+  path: song.scenes[{scene}].is_triggered
+  access: [get, observe]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    True while the scene is fired but has not started yet, i.e. during the wait for the
+    next launch quantisation point. Read-only. With song.clip_trigger_quantization set to
+    a bar, this is true for up to a bar after scene.fire - a read straight after firing
+    that shows nothing playing is correct, not a failure.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.clip_slots
+  path: song.scenes[{scene}].clip_slots
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The clip slots of this scene, one per track, as handles. The same slot objects
+    reachable as song.tracks[{track}].clip_slots[{scene}] - one grid, two ways in. Group
+    tracks appear in this list too and their slots behave differently; guard iteration as
+    with song.tracks (measured).
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.fire
+  path: song.scenes[{scene}]
+  access: [call]
+  method: fire
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Fire the scene: launch every clip in it and stop tracks that have an empty slot.
+    Returns nothing; confirm with scene.is_triggered, then with track.playing_slot_index
+    once the quantisation point has passed. Firing a scene with a tempo set changes
+    song.tempo as a side effect. Call verified 2026-08-30 against Live 12.4.5 with Remote
+    Script 0.6.x, on a scratch track created and deleted for the purpose. Called with no
+    arguments.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.fire_as_selected
+  path: song.scenes[{scene}]
+  access: [call]
+  method: fire_as_selected
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Fire the scene and select it, as pressing Enter in the session view does. Returns
+    nothing. Call verified 2026-08-30 against Live
+    12.4.5, on a scratch track created and deleted for the
+    purpose. Called with no arguments.
+  params:
+    - {name: scene, kind: int, required: true}
+
+- id: scene.set_fire_button_state
+  path: song.scenes[{scene}]
+  access: [call]
+  method: set_fire_button_state
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: broken
+  doc: >-
+    Hold or release the scene's fire button, for launch modes that care about how
+    long the button is held. Takes one boolean argument. Returns nothing. Over a
+    serial protocol the hold duration is the round-trip time, so this is of
+    limited use here - it is catalogued for completeness. What the call does has
+    never been measured from here.
+    REFUSED by this script's allowlist, by design: latching state with no reliable end.
+    Measured 2026-08-30 against Live 12.4.5 - the call answered method_not_allowed by name.
+    Clip.set_fire_button_state is allowed, because it addresses one clip.
+  params:
+    - {name: scene, kind: int, required: true}
+  args:
+    - {name: state, kind: bool, required: true}
+
+# ---------------------------------------------------------------------------
+# CuePoint - song.cue_points[{cue}]
+# ---------------------------------------------------------------------------
+
+- id: cue.name
+  path: song.cue_points[{cue}].name
+  access: [get, set, observe]
+  kind: str
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Locator name. Live names new locators automatically ("Locator 1", ...) and renaming is
+    the point of having them - section markers a human can read are what makes an
+    arrangement navigable.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: cue, kind: int, required: true}
+
+- id: cue.time
+  path: song.cue_points[{cue}].time
+  access: [get, observe]
+  kind: float
+  unit: beats
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Position of the locator in beats from the start of the arrangement. Read-only: a
+    locator cannot be moved through the LOM. To place one somewhere else, set
+    song.current_song_time, call song.set_or_delete_cue to create the new one, and toggle
+    the old one away.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: cue, kind: int, required: true}
+
+- id: cue.jump
+  path: song.cue_points[{cue}]
+  access: [call]
+  method: jump
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Move the playhead to this locator. Returns nothing; confirm with
+    song.current_song_time, which should then equal cue.time. While the transport
+    is running the jump is expected to obey launch quantisation rather than
+    happening instantly - unverified.
+    Call verified 2026-08-30 against Live 12.4.5: a locator was created at beat 8 with
+    song.set_or_delete_cue, jump() called on it, and song.current_song_time read back 8. The
+    locator was deleted again.
+  params:
+    - {name: cue, kind: int, required: true}
+
+- id: app.zoom_view
+  path: app.view
+  access: [call]
+  method: zoom_view
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Zoom a named view in or out by one step. Purely cosmetic for the audio, but it
+    decides what a human sees when they look at the screen after a batch has run.
+    Returns nothing. Measured 2026-08-29 against Live 12.4.5: called as
+    zoom_view(1, "Arranger", False) on app.view and accepted. The view name must be
+    one of app.available_main_views, which reported Browser, Arranger, Session,
+    Detail, Detail/Clip and Detail/DeviceChain on that install. The direction and
+    the third argument were NOT varied, so their exact meaning is not measured; the
+    LOM documents them as (direction, view_name, modifier).
+  args:
+    - {name: direction, kind: int, required: true,
+       doc: "Zoom step. 1 and 0 were the values tried; the sign convention is unverified."}
+    - {name: view_name, kind: str, required: true,
+       doc: "One of app.available_main_views."}
+    - {name: modifier, kind: bool, required: false, default: false,
+       doc: "Passed as False in the measurement; its effect is unverified."}
+
+- id: app.scroll_view
+  path: app.view
+  access: [call]
+  method: scroll_view
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Scroll a named view by one step. Same shape and the same caveats as
+    app.zoom_view. Measured 2026-08-29 against Live 12.4.5: called as
+    scroll_view(0, "Arranger", False) on app.view and accepted; returns nothing.
+    The direction convention and the third argument are unverified.
+  args:
+    - {name: direction, kind: int, required: true,
+       doc: "Scroll step. 0 was the value tried; the sign convention is unverified."}
+    - {name: view_name, kind: str, required: true,
+       doc: "One of app.available_main_views."}
+    - {name: modifier, kind: bool, required: false, default: false,
+       doc: "Passed as False in the measurement; its effect is unverified."}
+
+# ---------------------------------------------------------------------------
+# Appended by scripts/sync_catalog.py, 2026-08-30 against Live 12.4.5.
+# Live reports these on the objects named in each row's doc; the
+# catalog did not have them. Statuses come from the read that found
+# them and from nothing else.
+# ---------------------------------------------------------------------------
+
+- id: app.average_process_usage
+  path: app.average_process_usage
+  access: [get]
+  kind: float
+  unit: normalized
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Application.average_process_usage, found on the running object model and absent from this
+    catalog until scripts/sync_catalog.py proposed it. Live reports it as read-only. The unit is
+    not established. A raw LOM number is normalised far more often than it is physical, and the
+    display string only exists for a DeviceParameter that answers str_for_value()
+    (docs/protocol.md section 7). Read verified 2026-08-30 against Live 12.4.5 at
+    app.average_process_usage through lom_describe: returned 5.704285621643066 (float). No
+    write, call, observation or automation was attempted on this row.
+
+- id: app.number_of_push_apps_running
+  path: app.number_of_push_apps_running
+  access: [get]
+  kind: int
+  unit: normalized
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Application.number_of_push_apps_running, found on the running object model and absent from
+    this catalog until scripts/sync_catalog.py proposed it. Live reports it as read-only. The
+    unit is not established. A raw LOM number is normalised far more often than it is physical,
+    and the display string only exists for a DeviceParameter that answers str_for_value()
+    (docs/protocol.md section 7). Read verified 2026-08-30 against Live 12.4.5 at
+    app.number_of_push_apps_running through lom_describe: returned 0 (int). No write, call,
+    observation or automation was attempted on this row.
+
+- id: app.peak_process_usage
+  path: app.peak_process_usage
+  access: [get]
+  kind: float
+  unit: normalized
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Application.peak_process_usage, found on the running object model and absent from this
+    catalog until scripts/sync_catalog.py proposed it. Live reports it as read-only. The unit is
+    not established. A raw LOM number is normalised far more often than it is physical, and the
+    display string only exists for a DeviceParameter that answers str_for_value()
+    (docs/protocol.md section 7). Read verified 2026-08-30 against Live 12.4.5 at
+    app.peak_process_usage through lom_describe: returned 7.0 (float). No write, call,
+    observation or automation was attempted on this row.
+
+- id: app.unavailable_features
+  path: app.unavailable_features
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Application.unavailable_features, found on the running object model and absent from this
+    catalog until scripts/sync_catalog.py proposed it. Whether it can be written is not knowable
+    from a describe: Live's generated types use C-level descriptors that always look writable
+    and raise at assignment time, so the script reports null rather than guessing. Read verified
+    2026-08-30 against Live 12.4.5 at app.unavailable_features through lom_describe: a
+    UnavailableFeatureVector of 0 element(s). No write, call, observation or automation was
+    attempted on this row.
+
+- id: app.view
+  path: app.view
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Application.view, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Whether it can be written is not knowable from a
+    describe: Live's generated types use C-level descriptors that always look writable and raise
+    at assignment time, so the script reports null rather than guessing. Read verified
+    2026-08-30 against Live 12.4.5 at app.view through lom_describe: a View object. No write,
+    call, observation or automation was attempted on this row.
+
+- id: app.browse_mode
+  path: app.view.browse_mode
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    View.browse_mode, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at app.view.browse_mode through lom_describe: returned False (bool). No
+    write, call, observation or automation was attempted on this row.
+
+- id: app.toggle_browse
+  path: app.view
+  access: [call]
+  method: toggle_browse
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    View.toggle_browse() exists on the object at app.view in the running Live and is on the
+    Remote Script's allowlist, so lom_call will attempt it. Its arguments were NOT read: the LOM
+    publishes no signature over this channel, so `args` is empty and a call that needs arguments
+    will answer type_error until somebody fills them in. What it returns is unknown, hence kind:
+    object. Nothing has called it; this row is a reachable hypothesis, not a capability, and
+    the run that found it is recorded in the sync_catalog report rather than here, because an
+    untested row may not carry a measurement note. Call verified 2026-08-30 against Live 12.4.5:
+    invoked and it returned without error. The set was restored afterwards where the call had
+    any effect.
+
+- id: song.can_jump_to_next_cue
+  path: song.can_jump_to_next_cue
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Song.can_jump_to_next_cue, found on the running object model and absent from this catalog
+    until scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified
+    2026-08-30 against Live 12.4.5 at song.can_jump_to_next_cue through lom_describe: returned
+    True (bool). No write, call, observation or automation was attempted on this row.
+
+- id: song.can_jump_to_prev_cue
+  path: song.can_jump_to_prev_cue
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Song.can_jump_to_prev_cue, found on the running object model and absent from this catalog
+    until scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified
+    2026-08-30 against Live 12.4.5 at song.can_jump_to_prev_cue through lom_describe: returned
+    False (bool). No write, call, observation or automation was attempted on this row.
+
+- id: song.song_can_redo
+  path: song.can_redo
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Song.can_redo, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at song.can_redo through lom_describe: returned False (bool). No write,
+    call, observation or automation was attempted on this row.
+
+- id: song.song_can_undo
+  path: song.can_undo
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Song.can_undo, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at song.can_undo through lom_describe: returned True (bool). No write,
+    call, observation or automation was attempted on this row.
+
+- id: song.file_path
+  path: song.file_path
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Song.file_path, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at song.file_path through lom_describe: returned
+    an absolute path to the open set's project folder (string). No write, call,
+    observation or automation was attempted on this row.
+
+- id: song.name
+  path: song.name
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Song.name, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at song.name through lom_describe: returned the open set's name
+    (string). No write, call, observation or automation was attempted on this row.
+
+- id: song.select_on_launch
+  path: song.select_on_launch
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Song.select_on_launch, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at song.select_on_launch through lom_describe: returned True (bool). No
+    write, call, observation or automation was attempted on this row.
+
+- id: song.start_time
+  path: song.start_time
+  access: [get, set]
+  kind: float
+  unit: normalized
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Song.start_time, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as settable, and this row therefore
+    carries `set`, but no write has been attempted. The unit is not established. A raw LOM
+    number is normalised far more often than it is physical, and the display string only exists
+    for a DeviceParameter that answers str_for_value() (docs/protocol.md section 7). Read
+    verified 2026-08-30 against Live 12.4.5 at song.start_time through lom_describe: returned
+    0.0 (float). No write, call, observation or automation was attempted on this row.
+
+- id: song.tuning_system
+  path: song.tuning_system
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Song.tuning_system, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at song.tuning_system through lom_describe: returned null, so the type
+    is not settled by this reading. No write, call, observation or automation was attempted on
+    this row.
+
+- id: view.mod_mapping_device
+  path: song.view.mod_mapping_device
+  access: [get, set]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    View.mod_mapping_device, found on the running object model and absent from this catalog
+    until scripts/sync_catalog.py proposed it. Live reports it as settable, and this row
+    therefore carries `set`, but no write has been attempted. Read verified 2026-08-30 against
+    Live 12.4.5 at song.view.mod_mapping_device through lom_describe: returned null, so the type
+    is not settled by this reading. No write, call, observation or automation was attempted on
+    this row.
+
+- id: view.mod_mapping_parameter
+  path: song.view.mod_mapping_parameter
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    View.mod_mapping_parameter, found on the running object model and absent from this catalog
+    until scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified
+    2026-08-30 against Live 12.4.5 at song.view.mod_mapping_parameter through lom_describe:
+    returned null, so the type is not settled by this reading. No write, call, observation or
+    automation was attempted on this row.
+
+- id: view.selected_chain
+  path: song.view.selected_chain
+  access: [get, set]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    View.selected_chain, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as settable, and this row therefore
+    carries `set`, but no write has been attempted. Read verified 2026-08-30 against Live
+    12.4.5 at song.view.selected_chain through lom_describe: returned null, so the type is not
+    settled by this reading. No write, call, observation or automation was attempted on this
+    row.

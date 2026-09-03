@@ -1,0 +1,36 @@
+name: CI
+
+# The test suite must never require Ableton Live. Neither runner below has a
+# DAW, and that is the point: anything that can only be proven against running
+# Live is proven in a catalog `status`, not in a test that would skip itself
+# everywhere. See CONTRIBUTING.md.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint (ruff)
+        # Everything a contributor is expected to keep clean, scripts/ included:
+        # a linter that skips a directory reports green over code nobody checked.
+        # live-remote-script/ is the one exclusion, because it runs inside Live's
+        # own interpreter under different rules, and pyproject.toml excludes it too.
+        run: ruff check src scripts tests
+      - name: Test (pytest)
+        run: pytest -q

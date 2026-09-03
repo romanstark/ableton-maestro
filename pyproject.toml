@@ -1,0 +1,80 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ableton-maestro"
+version = "0.1.0"
+description = "MCP server connecting AI assistants to Ableton Live through the Live Object Model."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Roman Stark", email = "mail@romanstark.de" }]
+keywords = ["ableton", "ableton-live", "mcp", "lom", "music", "daw", "production"]
+
+dependencies = [
+    "mcp>=1.2,<2",      # FastMCP server framework
+    "pyyaml>=6",        # Loads catalog definitions (src/ableton_maestro/catalog/*.yaml)
+    # Declared even though mcp already pulls it in: src/ableton_maestro/toolargs.py
+    # imports it directly, and a direct import on a transitive dependency breaks
+    # the day the intermediary drops it. Only documented pydantic API is used --
+    # no reach into the MCP SDK's internals, so this bound stays as wide as the
+    # SDK's own.
+    "pydantic>=2.7,<3",
+]
+
+# Architectural dependency choices:
+# - No websocket dependencies: Transport to Live is a direct TCP loopback socket (docs/protocol.md §1).
+# - Pure standard library for music theory: The music/ package is self-contained without external audio/theory libs.
+# - Zero telemetry: No HTTP clients, databases, or analytics packages.
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    # Pinned to a minor range on purpose. An unbounded linter turns every new
+    # ruff release into a possible CI failure on code nobody touched: a rule
+    # moving into the default set is enough. Raise this deliberately, and run
+    # the suite when you do.
+    "ruff>=0.16,<0.17",
+]
+
+[project.scripts]
+ableton-maestro = "ableton_maestro.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ableton_maestro"]
+# Explicitly include YAML catalog files so the runtime registry is complete in built wheels
+artifacts = ["src/ableton_maestro/catalog/*.yaml", "src/ableton_maestro/**/*.yaml"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src",
+    "live-remote-script",
+    "scripts",
+    "docs",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "THIRD-PARTY.md",
+    "CLA.md",
+    "CONTRIBUTING.md",
+]
+
+[tool.pytest.ini_options]
+# src is a testpath because the docstring examples in it are tests. Without
+# --doctest-modules they are decorative: 59 of them sat in automation, introspect,
+# als and music and nothing ran them, so a reworded docstring could break one
+# silently. The one example that opens a real socket carries # doctest: +SKIP.
+testpaths = ["tests", "src"]
+addopts = ["--doctest-modules"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Exclude live-remote-script from Python 3.11 linting rules since it runs inside Ableton's internal interpreter
+extend-exclude = ["live-remote-script"]
+
+[tool.ruff.lint]
+# E501 is not in ruff's default rule set (E4, E7, E9, F), so the line-length declared
+# above is only enforced because this line selects the rule that reads it.
+extend-select = ["E501"]

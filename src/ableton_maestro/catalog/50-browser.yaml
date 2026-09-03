@@ -1,0 +1,1333 @@
+# Ableton Maestro: path catalog: browser and groove pool.
+#
+# WHY this file exists: the browser is the only way anything new enters a Live
+# set. Tracks, clips and mixer values can all be created from the object model,
+# but a device or a sample has to be found in the browser and loaded; if
+# the browser is not catalogued, "load an instrument" stays a hand-written
+# handler forever, which is exactly what docs/architecture.md, "the restart tax" is trying to avoid.
+# Schema: docs/architecture.md, "the catalog". Wire contract: docs/protocol.md.
+#
+# THE BROWSER IS A SECOND OBJECT GRAPH. It hangs off `app`
+# (Live.Application.get_application()), not off `song`, and it recurses to
+# arbitrary depth with tens of thousands of nodes. A catalog row can describe
+# its SHAPE (a root, an item, an item's children) but not its contents, and
+# walking it is a job for the `browser_walk` handler with its own depth limit,
+# result cap and its own clock: the walk truncates itself at 7.5 s, inside a 9 s
+# handler budget, inside the client's 10 s read class (docs/protocol.md §5.10, §8). The rows here are
+# for reaching a known place cheaply; they are not a substitute for the walk.
+#
+# ONE OBJECT PROBLEM RUNS THROUGH THE WHOLE FILE. Browser.load_item(),
+# preview_item() and the hotswap target all take a BrowserItem OBJECT, not a
+# URI string and not an index. `lom_call` passes a JSON list as `args`
+# (docs/protocol.md §5.5), and a live object cannot survive JSON; it comes
+# back as a handle, `{"__lom__": ...}` (§7). So the caller hands over a PATH to
+# the item, e.g. app.browser.instruments.children[3], and the script resolves
+# it to the object before calling. That resolution step is settled and written
+# down: an argument of the form `{"__path__": "<path>"}` is resolved through the
+# same resolver, with the same guards, as any other path (docs/protocol.md
+# §5.5, "Passing a Live object as an argument"), and the browser handler in the
+# Remote Script implements it. A `__path__` argument therefore reaches nothing a
+# plain `lom_get` could not, and `browser_walk` returns a `path` on every entry
+# so that a search result feeds straight back into load_item.
+#
+# STATUS DISCIPLINE. `status` is per row, and it is a measurement rather than an
+# intention. `verified` means the row was read, called or written against a
+# running Live: its `doc` carries the date, the Live version and which of the
+# three was done, and a row proved by a read is not thereby proved by a write.
+# `broken` means the path exists and Live refuses it, and `doc` says how it
+# fails. `untested` means nobody has run it; it is the default, and it is never
+# an implied "works". scripts/probe_paths.py and scripts/sync_catalog.py are what
+# move a row. A tool description built on this file may say "works" only for a
+# `verified` row (docs/architecture.md, "the catalog"): a wrong `verified` is
+# worse than a missing row.
+
+# =============================================================================
+# Browser roots
+#   Live.Browser, reachable at app.browser. Each root is a BrowserItem whose
+#   .children are the entries under it.
+# =============================================================================
+
+- id: browser.root
+  path: app.browser
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The browser itself, as a handle. Useful mainly as a target for lom_describe, which
+    lists the roots this Live build actually offers. Read that list at runtime rather
+    than assuming it: the set of roots differs between Live editions (Intro, Standard,
+    Suite) and between versions.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.instruments
+  path: app.browser.instruments
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The Instruments category. Its children are the stock instruments and their preset
+    folders. Loading an instrument onto a track REPLACES the instrument already there (
+    see browser.load_item), and read the track's device list first if the old one mattered.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.drums
+  path: app.browser.drums
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The Drums category, and the one browser folder with a measured trap. Its FIRST child
+    is the *Drum Rack* device itself (the empty container) and the actual kits are the
+    .adg files listed below it (974 of them in the measured installation). A name search
+    for "Drum Rack" therefore hits the empty container: the load reports success, the
+    device list shows a DrumGroupDevice, every clip and note check stays green, and the
+    track is silent. Load a .adg, or load the container and then check that rack.chains is
+    non-empty.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.sounds
+  path: app.browser.sounds
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The Sounds category (Live's curated instrument presets), organised by musical role
+    rather than by device. Entries here load as instruments and therefore replace the
+    track's existing instrument.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.audio_effects
+  path: app.browser.audio_effects
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The Audio Effects category. Entries here are APPENDED to the end of the track's device
+    chain; they never replace anything, and they never land in the middle. The loading
+    order is therefore the running order, unless it is corrected afterwards with
+    song.move_device.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.midi_effects
+  path: app.browser.midi_effects
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The MIDI Effects category (Arpeggiator, Chord, Scale, Velocity). Appended like audio
+    effects, but Live places them before the instrument in the chain, because that is the
+    only position where they do anything.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.plugins
+  path: app.browser.plugins
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Third-party VST2, VST3 and AU plugins. Two measured facts belong on this root. First,
+    a freshly loaded VST usually reports only its "Device On" parameter until controls are
+    picked up through Live's Configure mode; a limit in Live, per parameter and per
+    instance, 128 slots maximum, GUI only. Second, VST2 plugins never report units, so no
+    display reading is available for them however they are configured. Both are covered in
+    detail in 40-device.yaml under device.parameters and param.str_for_value.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.max_for_live
+  path: app.browser.max_for_live
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Max for Live devices. Worth knowing when identifying what got loaded: measured, a
+    large part of Live 12's instrument section reports the class name "MxDeviceInstrument"
+    (Max devices) wearing a stock device's face, and they are indistinguishable
+    from real stock devices by class name alone.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.samples
+  path: app.browser.samples
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Raw audio files. Loading one onto a MIDI track wraps it in a Simpler; loading it onto
+    an audio track creates a clip. Measured on imported audio: Live warps it on arrival,
+    short files are rounded to whole bars and long ones get a GUESSED tempo, and the warp
+    analysis runs asynchronously; a measurement taken immediately after loading measures
+    a half-finished state.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.clips
+  path: app.browser.clips
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Browsable clips (.alc). Loading one places a whole clip, with its notes, envelopes and
+    device chain, into a clip slot; that load has not been tested from here. This root is
+    not present in every Live version.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.packs
+  path: app.browser.packs
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Installed Packs, one child per Pack. The fastest way to find out what content this
+    particular installation actually has before a plan depends on it; a URI from another
+    machine's Pack resolves to nothing here.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.user_library
+  path: app.browser.user_library
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The User Library: saved presets, racks, samples and grooves. This is the same folder
+    tree that holds Remote Scripts, and its location is written in Preferences\Library.cfg
+    under <ProjectPath>: do not guess it, it is frequently not Documents (measured).
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.user_folders
+  path: app.browser.user_folders
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Folders the user added to the browser sidebar (Live's "Places"). Live 11 and later;
+    absent on older builds.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.current_project
+  path: app.browser.current_project
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The current Live project's own folder, as browsed. This is where a project's recorded
+    audio and its imported samples live, so it answers "what files does this set depend
+    on" without touching the file system directly.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.legacy_libraries
+  path: app.browser.legacy_libraries
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Libraries carried over from older Live installations. Usually empty.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.colors
+  path: app.browser.colors
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Live's colour palette as browser entries: the swatches that back track.color,
+    clip.color and chain.color_index. Reading it is the honest way to learn which colours
+    exist rather than assuming an RGB value will survive a write; Live snaps an arbitrary
+    colour to the nearest swatch. The read did not record whether this comes back as a
+    list or as a single BrowserItem.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.filter_type
+  path: app.browser.filter_type
+  access: [get, set]
+  kind: int
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Which filter the browser is currently applying: how Live narrows the list when a
+    hotswap target is set, so that only loadable things are shown. Left as a plain int:
+    the LOM's FilterType has a named enum, but the names and their order are not known
+    here and guessing them would be worse than saying so. Probe it with a hotswap target
+    set and again with none.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: browser.hotswap_target
+  path: app.browser.hotswap_target
+  access: [get, set]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The device or pad the browser is currently hot-swapping into: Live's "Hot-Swap" mode,
+    as a property. Setting it aims the next load at a specific place instead of at the
+    selected track, which is the only way to put a sample on a chosen Drum Rack pad
+    without moving the GUI selection. Takes a live object (a Device, a DrumPad or a
+    Chain), so the caller hands over a resolvable path, not a string: see the object
+    problem in this file's header. Setting it to None leaves hot-swap mode. Nothing on the
+    write side here: the aiming, the object argument, the None: has been tested.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+# =============================================================================
+# BrowserItem: one entry, one level down from a root
+#   Live.Browser.BrowserItem. `{root}` is the name of a browser root:
+#   instruments, drums, sounds, audio_effects, midi_effects, plugins,
+#   max_for_live, samples, clips, packs, user_library, user_folders,
+#   current_project, legacy_libraries. It substitutes as a plain attribute
+#   name, which the resolver's grammar allows (docs/protocol.md §6).
+# =============================================================================
+
+- id: browser.item
+  path: app.browser.{root}.children[{index}]
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    One entry directly under a browser root, as a handle. This is the object that
+    browser.load_item and browser.preview_item want, so this path is what a caller passes
+    them. Indices are positional and shift whenever the user's content changes: resolve
+    by name or URI first, then act, and never cache an index across sessions.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+
+- id: browser.item_name
+  path: app.browser.{root}.children[{index}].name
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The entry's display name, exactly as the browser shows it: including the file
+    extension for files, so a kit reads as "Kit-909 Classic.adg". Matching on this is how
+    a search works, and it is also how the measured Drum Rack trap bites: "Drum Rack"
+    matches the empty container device, never a kit.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+
+- id: browser.item_uri
+  path: app.browser.{root}.children[{index}].uri
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The entry's stable identifier: "query:Synths#..." for stock content, "vst3:..." or
+    "vst:..." for plugins, a file URL for user content. The right thing to record when a
+    plan needs to name a device, because a URI survives a browser reordering where an
+    index does not. It does NOT survive moving to another machine: a URI pointing into a
+    Pack that is not installed there resolves to nothing. A URI carries its category in
+    it, which is enough to guess which root to search first; purely an optimisation, but
+    a reminder of what the string is made of.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+
+- id: browser.item_is_folder
+  path: app.browser.{root}.children[{index}].is_folder
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether the entry contains other entries. A folder is never loadable; the two flags
+    are the pair to check before descending or before loading. Note that an entry can be a
+    folder AND have a device-like name: Live's preset folders are named after the device
+    they belong to.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+
+- id: browser.item_is_device
+  path: app.browser.{root}.children[{index}].is_device
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether the entry is a device rather than a preset or a file. Measured in the drums
+    folder: the empty Drum Rack container reports is_device true while every real kit
+    reports is_device false and is_loadable true, because the kits are .adg preset files.
+    So is_device true is not a quality mark; in that folder it is the warning sign.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+
+- id: browser.item_is_loadable
+  path: app.browser.{root}.children[{index}].is_loadable
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether browser.load_item would accept this entry. Check it before loading: calling
+    load_item on a folder is expected to raise inside Live, and an exception escaping a
+    handler kills the client connection (docs/protocol.md §6).
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+
+- id: browser.item_is_selected
+  path: app.browser.{root}.children[{index}].is_selected
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether this entry is the one highlighted in Live's browser GUI. Read-only here.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+
+- id: browser.item_source
+  path: app.browser.{root}.children[{index}].source
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Where the entry comes from: the Pack name, "User Library", or empty for built-in
+    content. The cheap way to tell a Pack-dependent choice from one that works on any
+    installation.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+
+- id: browser.item_children
+  path: app.browser.{root}.children[{index}].children
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The entries inside a folder. Reading this on a deep folder is where a browser walk
+    gets expensive, which is why the walk caps its recursion depth and caches URI lookups.
+    For anything wider than one folder, use the browser_walk handler with its depth limit
+    and result cap rather than stepping through these rows.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+
+# =============================================================================
+# BrowserItem: two and three levels down
+#   The catalog stops here. Deeper than this the shape repeats and only
+#   browser_walk is a sane way to travel (docs/protocol.md §5.10).
+# =============================================================================
+
+- id: browser.child
+  path: app.browser.{root}.children[{index}].children[{child}]
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    An entry two levels below a root, typically a preset inside a device's
+    folder. This is the depth most real loads happen at: the instrument's
+    folder, then the preset.
+    Read verified 2026-08-30 against Live 12.4.5 at app.browser.instruments.children[0].children
+    through lom_describe: a BrowserItemVector of 15 element(s). No write, call, observation or
+    automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+
+- id: browser.child_name
+  path: app.browser.{root}.children[{index}].children[{child}].name
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Display name of an entry two levels below a root. See browser.item_name.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].name through lom_describe: returned 'Ambient
+    & Evolving' (string). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+
+- id: browser.child_uri
+  path: app.browser.{root}.children[{index}].children[{child}].uri
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Stable identifier of an entry two levels below a root. Record this rather
+    than the two indices that led to it.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].uri through lom_describe: returned
+    'query:Synths#Analog:Ambient%20&%20Evolving' (string). No write, call, observation or
+    automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+
+- id: browser.child_is_folder
+  path: app.browser.{root}.children[{index}].children[{child}].is_folder
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether an entry two levels below a root contains further entries.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].is_folder through lom_describe: returned
+    True (bool). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+
+- id: browser.child_is_device
+  path: app.browser.{root}.children[{index}].children[{child}].is_device
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether an entry two levels below a root is a device rather than a preset or file.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].is_device through lom_describe: returned
+    False (bool). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+
+- id: browser.child_is_loadable
+  path: app.browser.{root}.children[{index}].children[{child}].is_loadable
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether browser.load_item would accept an entry two levels below a root.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].is_loadable through lom_describe: returned
+    False (bool). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+
+- id: browser.child_source
+  path: app.browser.{root}.children[{index}].children[{child}].source
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Which Pack or library an entry two levels below a root comes from.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].source through lom_describe: returned ''
+    (string). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+
+- id: browser.child_children
+  path: app.browser.{root}.children[{index}].children[{child}].children
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The entries three levels below a root. The last level this catalog
+    describes; below it, use browser_walk.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].children through lom_describe: a
+    BrowserItemVector of 7 element(s). No write, call, observation or automation was attempted
+    on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+
+- id: browser.grandchild
+  path: app.browser.{root}.children[{index}].children[{child}].children[{grandchild}]
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    An entry three levels below a root, as a handle, deep enough for the
+    common "category, device, preset folder, preset" shape. Beyond this the
+    catalog stops describing and browser_walk takes over.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].children through lom_describe: a
+    BrowserItemVector of 7 element(s). No write, call, observation or automation was attempted
+    on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+    - {name: grandchild, kind: int, required: true}
+
+- id: browser.grandchild_name
+  path: app.browser.{root}.children[{index}].children[{child}].children[{grandchild}].name
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Display name of an entry three levels below a root.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].children[0].name through lom_describe:
+    returned 'Ahab Bass.adg' (string). No write, call, observation or automation was attempted
+    on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+    - {name: grandchild, kind: int, required: true}
+
+- id: browser.grandchild_uri
+  path: app.browser.{root}.children[{index}].children[{child}].children[{grandchild}].uri
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Stable identifier of an entry three levels below a root.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].children[0].uri through lom_describe:
+    returned 'query:Synths#Analog:Ambient%20&%20Evolving:FileId_116891' (string). No write,
+    call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+    - {name: grandchild, kind: int, required: true}
+
+- id: browser.grandchild_is_loadable
+  path: app.browser.{root}.children[{index}].children[{child}].children[{grandchild}].is_loadable
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether an entry three levels below a root can be loaded.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].children[0].is_loadable through
+    lom_describe: returned True (bool). No write, call, observation or automation was attempted
+    on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+    - {name: grandchild, kind: int, required: true}
+
+- id: browser.grandchild_is_folder
+  path: app.browser.{root}.children[{index}].children[{child}].children[{grandchild}].is_folder
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Whether an entry three levels below a root has further entries under it. If
+    it does, stop reading rows and call browser_walk.
+    Read verified 2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].children[0].is_folder through lom_describe:
+    returned False (bool). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: [audio_effects, clips, current_project, drums, instruments, legacy_libraries, max_for_live, midi_effects, packs, plugins, samples, sounds, user_folders, user_library]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+    - {name: grandchild, kind: int, required: true}
+
+# =============================================================================
+# Browser methods
+# =============================================================================
+
+- id: browser.load_item
+  path: app.browser
+  access: [call]
+  method: load_item
+  destructive: true
+  verify: none
+  status: verified
+  doc: >-
+    Load a browser entry into the set. Args: [item], where item must be a BrowserItem
+    OBJECT: the caller passes a path such as app.browser.instruments.children[3] and the
+    script resolves it (see this file's header). Four things that decide whether this call
+    does what was meant. (1) IT TAKES NO TRACK ARGUMENT. It loads onto whatever is
+    selected (read from the source, not measured). Set song.view.selected_track
+    immediately before calling, or aim the load with browser.hotswap_target. (2) An EFFECT is
+    APPENDED to the end of the chain; an INSTRUMENT REPLACES the instrument already on the
+    track. The second half is why this row is marked destructive: loading an instrument
+    onto a track that already has one silently discards it, together with every parameter
+    the user configured on it and every clip envelope pointing at it. (3) LOADING PLUGINS
+    IN RAPID SUCCESSION CAN CRASH LIVE (measured; a batch load during a background plugin
+    rescan plus a licence dialog took the whole application down). Pace batch loads, write
+    results to disk after each item rather than at the end, check the connection between
+    loads, and save the set first. (4) A successful return proves the call ran, not that
+    anything sounds. The measured Drum Rack case reported loaded: true with a silent
+    track. Verify by reading the track's device list and, for a rack, that rack.chains is
+    non-empty.
+    Measured 2026-08-29 against Live 12.4.5: loading a .mid from a user folder WORKS and
+    creates a NEW TRACK carrying the file's clip - it does not fill the selected clip slot
+    (one file gave a 204-beat clip with 364 notes). A probe that only checks the target
+    slot will wrongly conclude the load failed.
+    Loading an INSTRUMENT renames the track, but only while the track still carries Live's
+    default name. Measured 2026-08-30 against Live 12.4.5: loading Operator onto '2-MIDI' left
+    the track called '2-Operator', while the same load onto a track renamed 'MyBass'
+    beforehand left 'MyBass' untouched. An EFFECT never renames - a track carrying two
+    Compressors was still '4-Audio'. A track name cached from an earlier get_session is
+    therefore stale after an instrument load onto a default-named track.
+  params: []
+
+- id: browser.preview_item
+  path: app.browser
+  access: [call]
+  method: preview_item
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Audition a browser entry without loading it. Args: [item], a BrowserItem
+    object handed over as a path. Non-destructive and the polite way to check a
+    sample. It makes SOUND, which matters if a human is in the room or a
+    recording is running. Whether preview works for devices as well as for
+    samples was not tested.
+    Call verified 2026-08-30 against Live 12.4.5: signature preview_item(TPythonBrowserItem) -
+    the item is passed by path. Called on a browser item and ended with stop_preview.
+  params: []
+
+- id: browser.stop_preview
+  path: app.browser
+  access: [call]
+  method: stop_preview
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Stop whatever browser.preview_item started. Args: []. Call it in a finally block: a
+    preview left running is the audible equivalent of the measured probe that left Delay
+    Feedback at 100 %. Call verified 2026-08-30 against Live 12.4.5 with Remote Script
+    0.6.x, on a scratch track created and deleted for the purpose. Called with no
+    arguments.
+  params: []
+
+- id: browser.relation_to_hotswap_target
+  path: app.browser
+  access: [call]
+  method: relation_to_hotswap_target
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Ask how a browser entry relates to the current hot-swap target: whether it
+    is the loaded one, a sibling, or unrelated). Args: [item], a BrowserItem
+    object handed over as a path. Returns an integer relation code whose
+    mapping is not known here; probe it against a known-loaded preset to learn
+    which code means "this is the one".
+    Call verified 2026-08-30 against Live 12.4.5: signature
+    relation_to_hotswap_target(TPythonBrowserItem). Returned the int 3 for an item while
+    app.browser.hotswap_target was null.
+  params: []
+
+# =============================================================================
+# Groove pool
+#
+#   EVERY ROW IN THIS BLOCK IS UNVERIFIED, AND SO IS THE BLOCK ITSELF. Grooves
+#   are the timing and velocity templates in Live's Groove Pool. Whether the
+#   LOM exposes the pool as `song.groove_pool.grooves` at all is not established here -
+#   docs/architecture.md, "the catalog" lists the groove pool as a target with the word
+#   "unverified" next to it, and no measurement exists. These rows are written so
+#   probe_paths.py has something to aim at; a
+#   missing row cannot be probed, and a silently omitted feature stays missing
+#   forever (docs/architecture.md, "the catalog").
+#
+#   If the probe comes back empty, the whole block moves to docs/limits.md and
+#   the groove pool becomes a channel-B question: the .als stores the pool,
+#   and reading it there does not depend on the LOM.
+# =============================================================================
+
+- id: groove.pool
+  path: song.groove_pool.grooves
+  access: [get, observe]
+  kind: list
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The Groove Pool: every groove loaded into this set, in pool order. Unlike the
+    browser's groove files (.agr, under browser.user_library), these are the grooves the
+    set actually carries and the only ones a clip can be assigned. Every row below it in
+    this block hangs off this property.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: groove.name
+  path: song.groove_pool.grooves[{groove}].name
+  access: [get, set, observe]
+  kind: str
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    A groove's name in the pool. Expected to be writable, though that write was not
+    attempted. The name is how a human recognises a groove and the only identifier the
+    pool offers; there is no stable id, so a plan that names a groove must re-resolve it
+    after the pool changes.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: groove, kind: int, required: true}
+
+- id: groove.quantization_amount
+  path: song.groove_pool.grooves[{groove}].quantization_amount
+  access: [get, set, observe]
+  kind: float
+  range: [0.0, 1.0]
+  unit: normalized
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    How strongly the groove pulls notes onto its own grid before applying its timing
+    offsets (Live's "Quantize" control in the Groove Pool). 0 leaves the performance
+    alone, 1 hard-quantises first. Neither that behaviour nor the range was tested.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: groove, kind: int, required: true}
+
+- id: groove.timing_amount
+  path: song.groove_pool.grooves[{groove}].timing_amount
+  access: [get, set, observe]
+  kind: float
+  range: [0.0, 1.0]
+  unit: normalized
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    How much of the groove's timing displacement is applied (the "Timing" control). This
+    is the one that makes a groove audible at all: at 0 the groove is assigned and does
+    nothing, which looks exactly like a failed assignment. The range was not tested:
+    Live's GUI shows this as a percentage that can exceed 100 %, so the 0..1 bound here is
+    a guess.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: groove, kind: int, required: true}
+
+- id: groove.random_amount
+  path: song.groove_pool.grooves[{groove}].random_amount
+  access: [get, set, observe]
+  kind: float
+  range: [0.0, 1.0]
+  unit: normalized
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    How much random timing deviation the groove adds on top of its pattern: the "Random"
+    control. Non-deterministic by design, which means a set with a non-zero random amount
+    does not play back identically twice and no read-back can prove what was heard.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: groove, kind: int, required: true}
+
+- id: groove.velocity_amount
+  path: song.groove_pool.grooves[{groove}].velocity_amount
+  access: [get, set, observe]
+  kind: float
+  range: [-1.0, 1.0]
+  unit: normalized
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    How much the groove reshapes note velocities (the "Velocity" control), which Live
+    shows as a signed percentage, so negative values invert the accent pattern. The range
+    here is a guess from the GUI, not a measurement.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: groove, kind: int, required: true}
+
+- id: groove.base
+  path: song.groove_pool.grooves[{groove}].base
+  access: [get, set, observe]
+  kind: enum
+  enum: [0, 1, 2, 3, 4, 5]
+  range: [0, 4]
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  means:
+    "0": >-
+      gb_four - 1/4. Easy to miss: it is the value most listings of this enum leave
+      out, and leaving it out shifts every other value by one
+    "1": >-
+      gb_eight - 1/8
+    "2": >-
+      gb_eight_triplet - 1/8 triplet
+    "3": >-
+      gb_sixteen - 1/16
+    "4": >-
+      gb_sixteen_triplet - 1/16 triplet
+    "5": >-
+      gb_thirtytwo - 1/32
+  doc: >-
+    The note grid the groove's timing offsets are measured against. Wire value is the
+    integer index; both the names and their order are read off Live's GUI, not from a
+    measurement. Getting this wrong shifts the whole feel by a subdivision, which is
+    audible immediately and easy to misdiagnose as the groove "not working".
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+    Value names read off Live.Groove.Base through the enum_names handler (docs/protocol.md
+    section 5.12), measured 2026-08-31 against Live 12.4.5 - not transcribed from a reference.
+    Cycling 74's LOM documentation agrees.
+  params:
+    - {name: groove, kind: int, required: true}
+
+- id: groove.global_amount
+  path: song.groove_amount
+  access: [get, set, observe, automate]
+  kind: float
+  range: [0.0, 1.0]
+  unit: normalized
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The global Groove Amount slider: one multiplier over every groove in the set at once.
+    Setting it to 0 disables every groove without unassigning anything, which is the
+    fastest A/B test of whether a groove is doing anything at all. NOTE FOR THE
+    MAINTAINER: this is Song.groove_amount and therefore also belongs to the song area
+    (docs/architecture.md, "the catalog" lists it under Song/Transport). It is here because it is unusable
+    without the rest of this block. If the song catalog file also carries it, keep one row
+    and delete the other; two ids on one path is a registry problem waiting to happen.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params: []
+
+- id: groove.clip_assignment
+  path: song.tracks[{track}].clip_slots[{slot}].clip.groove
+  access: [get, set, observe]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Which groove a Session clip plays with, as a handle; None when the clip has none.
+    Assigning takes a Groove OBJECT, not a name and not a pool index, so the caller hands
+    over a path like song.groove_pool.grooves[2] for the script to resolve: the same
+    object problem as browser.load_item). Setting it to None removes the assignment. A
+    groove changes when notes sound WITHOUT changing the notes: notes_get still returns
+    the written positions, so a groove is invisible to every note-level check and can only
+    be confirmed by reading this property. The read is measured; assigning a groove, and
+    clearing it with None, is not.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: groove.clip_assignment_name
+  path: song.tracks[{track}].clip_slots[{slot}].clip.groove.name
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The name of the groove assigned to a Session clip, read through the clip: the one-
+    call answer to "does this clip have a groove, and which". On a clip with no groove the
+    property is None rather than an object, so the read fails there: check
+    groove.clip_assignment first. Read verified 2026-08-30 against Live 12.4.5
+    AFTER assigning a groove: returned "Swing 16ths 66". Probing a clip with no groove
+    answers no_such_path "NoneType has no attribute 'name'", which is a fact about the
+    clip and not about this row; the container is optional, so the precondition has to
+    be built before the row can be probed at all.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: groove.arrangement_clip_assignment
+  path: song.tracks[{track}].arrangement_clips[{clip}].groove
+  access: [get, set, observe]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    The groove assigned to an Arrangement clip. Listed separately because Arrangement
+    clips have repeatedly turned out to be the poor relations of the LOM; measured,
+    clip.automation_envelope() returns None for them, which is why automation must be
+    written in Session and duplicated afterwards. It is plausible that grooves behave the
+    same way; that is a guess and needs a probe. If it fails, the workaround is the same
+    one: assign in Session, then duplicate into the Arrangement.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+# ---------------------------------------------------------------------------
+# Appended by scripts/sync_catalog.py, 2026-08-30 against Live 12.4.5.
+# Live reports these on the objects named in each row's doc; the
+# catalog did not have them. Statuses come from the read that found
+# them and from nothing else.
+# ---------------------------------------------------------------------------
+
+- id: browser.is_device
+  path: app.browser.{root}.is_device
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.is_device, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at app.browser.instruments.is_device through lom_describe: returned
+    False (bool). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+
+- id: browser.is_folder
+  path: app.browser.{root}.is_folder
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.is_folder, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at app.browser.instruments.is_folder through lom_describe: returned
+    False (bool). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+
+- id: browser.is_loadable
+  path: app.browser.{root}.is_loadable
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.is_loadable, found on the running object model and absent from this catalog
+    until scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified
+    2026-08-30 against Live 12.4.5 at app.browser.instruments.is_loadable through lom_describe:
+    returned False (bool). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+
+- id: browser.is_selected
+  path: app.browser.{root}.is_selected
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.is_selected, found on the running object model and absent from this catalog
+    until scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified
+    2026-08-30 against Live 12.4.5 at app.browser.instruments.is_selected through lom_describe:
+    returned False (bool). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+
+- id: browser.iter_children
+  path: app.browser.{root}.iter_children
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.iter_children, found on the running object model and absent from this catalog
+    until scripts/sync_catalog.py proposed it. Whether it can be written is not knowable from a
+    describe: Live's generated types use C-level descriptors that always look writable and raise
+    at assignment time, so the script reports null rather than guessing. Read verified
+    2026-08-30 against Live 12.4.5 at app.browser.instruments.iter_children through
+    lom_describe: a BrowserItemIterator of 32 element(s). No write, call, observation or
+    automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+
+- id: browser.name
+  path: app.browser.{root}.name
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.name, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at app.browser.instruments.name through lom_describe: returned
+    'Instrumente' (string). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+
+- id: browser.source
+  path: app.browser.{root}.source
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.source, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at app.browser.instruments.source through lom_describe: returned ''
+    (string). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+
+- id: browser.uri
+  path: app.browser.{root}.uri
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.uri, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at app.browser.instruments.uri through lom_describe: returned
+    'query:Synths' (string). No write, call, observation or automation was attempted on this
+    row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+
+- id: browser.children_iter_children
+  path: app.browser.{root}.children[{index}].iter_children
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.iter_children, found on the running object model and absent from this catalog
+    until scripts/sync_catalog.py proposed it. Whether it can be written is not knowable from a
+    describe: Live's generated types use C-level descriptors that always look writable and raise
+    at assignment time, so the script reports null rather than guessing. Read verified
+    2026-08-30 against Live 12.4.5 at app.browser.instruments.children[0].iter_children through
+    lom_describe: a BrowserItemIterator of 15 element(s). No write, call, observation or
+    automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+    - {name: index, kind: int, required: true}
+
+- id: browser.children_is_selected
+  path: app.browser.{root}.children[{index}].children[{child}].is_selected
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.is_selected, found on the running object model and absent from this catalog
+    until scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified
+    2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].is_selected through lom_describe: returned
+    False (bool). No write, call, observation or automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+
+- id: browser.children
+  path: app.browser.{root}.children[{index}].children[{child}].children[{grandchild}].children
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.children, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Whether it can be written is not knowable from a
+    describe: Live's generated types use C-level descriptors that always look writable and raise
+    at assignment time, so the script reports null rather than guessing. Read verified
+    2026-08-30 against Live 12.4.5 at
+    app.browser.instruments.children[0].children[0].children[0].children through lom_describe: a
+    BrowserItemVector of 0 element(s). No write, call, observation or automation was attempted
+    on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+    - {name: grandchild, kind: int, required: true}
+
+- id: browser.children_is_device
+  path: app.browser.{root}.children[{index}].children[{child}].children[{grandchild}].is_device
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.is_device, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at app.browser.instruments.children[0].children[0].children[0].is_device
+    through lom_describe: returned False (bool). No write, call, observation or automation was
+    attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+    - {name: grandchild, kind: int, required: true}
+
+- id: browser.children_source
+  path: app.browser.{root}.children[{index}].children[{child}].children[{grandchild}].source
+  access: [get]
+  kind: str
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    BrowserItem.source, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at app.browser.instruments.children[0].children[0].children[0].source
+    through lom_describe: returned 'Drone Lab' (string). No write, call, observation or
+    automation was attempted on this row.
+  params:
+    - {name: root, kind: enum, required: true, enum: ["audio_effects", "clips", "current_project", "drums", "instruments", "legacy_libraries", "max_for_live", "midi_effects", "packs", "plugins", "samples", "sounds", "user_folders", "user_library"]}
+    - {name: index, kind: int, required: true}
+    - {name: child, kind: int, required: true}
+    - {name: grandchild, kind: int, required: true}

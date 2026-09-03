@@ -1,0 +1,19 @@
+# Line endings are normalised to LF in the repository and checked out as LF
+# everywhere. Development happens on Windows and CI runs on Linux and Windows, so
+# leaving this to each machine's autocrlf setting means the same file hashes
+# differently depending on who committed it — and a Remote Script that Live reads
+# is not somewhere to discover a line-ending surprise.
+* text=auto eol=lf
+
+# Binary, never touched
+*.png binary
+*.jpg binary
+*.gz  binary
+*.als binary
+*.adg binary
+*.adv binary
+
+# The catalog is data a human reads in diffs. Marking it explicitly keeps Git from
+# guessing, and keeps a 7000-line YAML from ever being treated as binary.
+*.yaml text eol=lf
+*.yml  text eol=lf

@@ -1,0 +1,3986 @@
+# Ableton Maestro - path catalog: clip slots and clips.
+#
+# Three areas live in this file:
+#
+#   clip_slot          Live.ClipSlot.ClipSlot - the cells of the Session grid.
+#   clip               Live.Clip.Clip reached through a Session clip slot.
+#   arrangement_clip   the same Live.Clip.Clip class reached through
+#                      Track.arrangement_clips - the Arrangement timeline.
+#
+# The class is one class; the two addressing routes are not interchangeable, and
+# the difference is not cosmetic. Automation exists only on the Session route
+# (compare clip.automation_envelope with arrangement_clip.automation_envelope),
+# and only the Session route has a slot to fire.
+#
+# WHY this is data and not code: docs/architecture.md, "the restart tax". A handler inside
+# Live's process costs every user a full Live restart to change; a catalog row
+# costs nothing. Anything expressible as a row must be a row.
+#
+# STATUS DISCIPLINE - read this before quoting any row as a capability.
+# `status` is per row, and it is a measurement rather than an intention.
+# `verified` - the row was read, called or written against a running Live. Its
+# `doc` carries the date and the Live version, and says which of the three was
+# done; a read-verified row is not thereby write-verified.
+# `broken` - the path exists and Live refuses it. `doc` says how it fails.
+# `untested` - nobody has run it. It is the default, and it is never an implied
+# "works".
+# scripts/probe_paths.py and scripts/sync_catalog.py are what move a row.
+# A tool description built on this file may say "works" only for a `verified`
+# row (docs/architecture.md, "the catalog"). A wrong `verified` is worse than a
+# missing row: the missing row is looked up again, the wrong one is trusted.
+#
+# Conventions used in this file
+# -----------------------------
+# params:   one entry per {placeholder} in `path`. Nothing else goes here, so
+#           "every placeholder has a params entry" stays literally checkable.
+# args:     the positional arguments of `method`, in call order. Only rows with
+#           `access: [call]` carry it. Separate key, same entry shape as params.
+#           docs/protocol.md section 5.5: args is a list; the LOM takes no
+#           keyword arguments.
+# verify:   `read_back` - the executor re-reads the property with the same
+#           accessor and reports before/after/clamped (docs/protocol.md 5.4).
+#           `none` - there is nothing to read back; the result proves only that
+#           the call did not raise (docs/protocol.md section 10).
+#           Any other value names a checker the executor looks up. Names used
+#           here: has_clip, no_clip, clip_length, notes_count, playing_state,
+#           envelope_present, envelope_absent, warp_state. A checker the
+#           executor has not implemented degrades to `none` - it must never
+#           silently report success it did not establish.
+# observe:  present in `access` where the LOM is expected to offer
+#           add_<property>_listener. Listener availability is per property and
+#           has not been probed in this file: read `observe` as expected, not
+#           measured. Registration goes through events_observe
+#           (docs/protocol.md section 5.11).
+#
+# Units
+# -----
+# `beats` is Live's beat - clip-local for markers and note times, timeline-global
+# for Arrangement start_time/end_time. `normalized` means 0.0..1.0 with a
+# non-linear mapping to anything physical: not dB, not Hz (docs/protocol.md
+# section 7). `none` is also used where Live's unit has no entry in the catalog
+# vocabulary (bars, cents, sample frames); the doc says which.
+#
+# Clip.gain deliberately carries NO `display:` field even though Live shows it in
+# dB. `display` in a lom_get result is reserved for DeviceParameter objects that
+# answer str_for_value() (docs/protocol.md section 5.3). A Clip is not a
+# DeviceParameter; its readable dB string is a separate property,
+# clip.gain_display_string. Promising a `display` here would be a lie the handler
+# cannot keep.
+#
+# Measured traps recorded in the rows below
+# ---------------------------------------------------------
+#  * Automation exists only in Session clips. clip.automation_envelope() returns
+#    None for Arrangement clips. Write in Session, then duplicate - never the
+#    reverse, and never write after duplicating: the Session read-back happily
+#    confirms a curve that reached no Arrangement clip at all.
+#  * Clip.set_notes() APPENDS. It does not replace. Measured at the artefact:
+#    63 notes plus a "correcting" 23 gave 86 notes in the clip, and the call
+#    reported 23. Our notes_set defaults to replace (docs/protocol.md 5.8).
+#  * A track has only as many clip slots as the set has scenes - 8 in a fresh
+#    set. Slot 8 raises "Clip index out of range".
+#  * An imported audio clip may arrive warped, depending on Live's Auto-Warp
+#    preference, and the clip length in beats is what reveals it.
+
+# =====================================================================
+# clip_slot - the Session grid cell
+# =====================================================================
+
+- id: clip_slot.list
+  path: song.tracks[{track}].clip_slots
+  access: [get]
+  kind: list
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    All clip slots of one track. Measured trap: a track has exactly as many clip slots as
+    the set has scenes - 8 in a fresh Live set - and addressing slot 8 raises "Clip index
+    out of range". Read this length before looping; never assume a slot count. More slots
+    come from creating scenes, not from the track. Group tracks do have clip slots, but
+    theirs are group slots (see clip_slot.is_group_slot) and hold no clip of their own.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+
+- id: clip_slot.clip
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [get, observe]
+  kind: object
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    The Clip in this slot, or None when the slot is empty. Returned as a handle (__lom__
+    Clip plus its path), never serialised - docs/protocol.md section 7. Check
+    clip_slot.has_clip first: reading a property off a None clip is a no_such_path error,
+    not an empty result.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.has_clip
+  path: song.tracks[{track}].clip_slots[{slot}].has_clip
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this slot holds a clip. The cheap guard before any clip.* path on this slot,
+    and the honest check after create_clip or delete_clip - neither of those reports its
+    outcome by return value.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.has_stop_button
+  path: song.tracks[{track}].clip_slots[{slot}].has_stop_button
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether an empty slot shows a stop button - the square that silences the track's
+    Session playback when fired. Writable on empty slots; on a slot that holds a clip the
+    write is expected to be ignored, which no write here has tested. It is exactly the case
+    where the lom_set read-back earns its keep, because Live reports no error for a write
+    that did nothing.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.is_playing
+  path: song.tracks[{track}].clip_slots[{slot}].is_playing
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the clip in this slot is currently sounding. False for an empty slot. Distinct
+    from clip.is_playing in one useful way: this stays readable when the slot is empty,
+    which makes it the safer thing to poll in a loop over a grid.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.is_recording
+  path: song.tracks[{track}].clip_slots[{slot}].is_recording
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this slot is currently recording. clip.is_recording answers the same question
+    from the clip side, once the clip exists.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.is_triggered
+  path: song.tracks[{track}].clip_slots[{slot}].is_triggered
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the slot is armed to launch and waiting for the next quantization boundary -
+    the blinking state. Between fire() and the actual start this is true while is_playing
+    is still false, so a fire-then-verify that only checks is_playing reports failure on
+    any set with global quantization on.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.is_group_slot
+  path: song.tracks[{track}].clip_slots[{slot}].is_group_slot
+  access: [get]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    True when this slot belongs to a group track. A group slot holds no clip of its own;
+    firing it fires the member tracks' slots. Related measured trap for the enclosing loop
+    rather than for this row: group tracks break unguarded iteration over song.tracks - no
+    arm flag, no arrangement clips (docs/protocol.md section 6). Check this before
+    assuming a slot can hold a clip.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.controls_other_clips
+  path: song.tracks[{track}].clip_slots[{slot}].controls_other_clips
+  access: [get]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    True when firing this slot also fires clips elsewhere - the group-slot case, and a
+    slot inside a folded group. Read it before reasoning about what a fire() will start:
+    the effect is wider than the path suggests.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.will_record_on_start
+  path: song.tracks[{track}].clip_slots[{slot}].will_record_on_start
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether firing this slot starts a recording instead of a playback - true when the
+    track is armed and the slot is empty, or session record is engaged. The one property
+    that separates "fire plays something" from "fire starts capturing", and the second is
+    not undone by firing again.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.playing_status
+  path: song.tracks[{track}].clip_slots[{slot}].playing_status
+  access: [get, observe]
+  kind: int
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    Combined launch state of the slot as an integer (stopped / playing / recording /
+    triggered). The numeric mapping is deliberately NOT asserted here - which integer
+    stands for which state has not been established against a running Live. Use
+    lom_describe or probe it before branching on the number; the individual booleans above
+    are safe to use today.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.color
+  path: song.tracks[{track}].clip_slots[{slot}].color
+  access: [get, set, observe]
+  kind: int
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Slot colour as 0x00RRGGBB. On an occupied slot this mirrors the clip's colour; on an
+    empty one it is the stop-button colour. Whether it is writable on an empty slot is not
+    measured. Live 11 and later accept arbitrary RGB; older
+    versions snap to the 70-entry palette, which this installation cannot show, and the
+    lom_set read-back is what will reveal the snap.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.color_index
+  path: song.tracks[{track}].clip_slots[{slot}].color_index
+  access: [get, set, observe]
+  kind: int
+  range: [0, 69]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    Slot colour as an index into Live's palette instead of raw RGB. Safer than
+    clip_slot.color when the goal is "a colour Live actually has". The upper bound of 69
+    is the documented palette size; no write has probed what happens past it.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.create_clip
+  path: song.tracks[{track}].clip_slots[{slot}]
+  access: [call]
+  method: create_clip
+  destructive: false
+  verify: has_clip
+  status: verified
+  doc: >-
+    Create an empty MIDI clip of `length` beats in this slot. MIDI tracks only -
+    on an audio track the LOM raises. Measured trap: create_clip does NOT
+    overwrite. An occupied slot raises "Clip slot already has a clip", so delete
+    first when replacing. Second measured trap: a fresh set has 8 scenes, so slot
+    8 raises "Clip index out of range" - read clip_slot.list first. `length` is
+    in beats and becomes the clip's loop length, not a bar count.
+    Call verified 2026-08-30 against Live 12.4.5: signature create_clip(double). Called with 4
+    on an empty slot; has_clip read back true and the clip's length read back 4.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: length, kind: float, required: true}
+
+- id: clip_slot.create_audio_clip
+  path: song.tracks[{track}].clip_slots[{slot}]
+  access: [call]
+  method: create_audio_clip
+  destructive: false
+  verify: warp_state
+  status: verified
+  doc: >-
+    Load an audio file into this slot from an absolute path. Audio tracks only.
+    This method lives on ClipSlot, not on Clip - there is no clip.create_audio_clip.
+    Measured trap, and an expensive one: depending on Live's Auto-Warp preference
+    the clip may arrive WARPED at a tempo Live guessed from transients. Four
+    identical 311.7 s vocal renders at 124 BPM should each have been 644.2 beats;
+    they reported 318.08, 586.13, 350.70 and 931.17 - four different guesses, no
+    constant factor to divide out. The check costs one line: expected =
+    seconds * bpm / 60, and a deviation above 2 percent means warped. Second half
+    of the same trap - Live's warp analysis is ASYNCHRONOUS: immediately after
+    this call the clip still reports its raw length, so poll clip.length until
+    two consecutive reads agree before judging. The durable fix is the preference
+    (Record / Warp / Launch -> Auto-Warp Long Samples off), not a per-clip switch.
+    Third consequence, the quiet one: a clip envelope reaches only to the clip's
+    end, so a wrongly warped clip truncates automation written onto it - a
+    22-point send curve was cut to 11, plausibly, and only the tail was wrong.
+    Call verified 2026-08-30 against Live 12.4.5: signature create_audio_clip(TString) - one
+    absolute path, no length. The clip read back with is_audio_clip true and file_path equal
+    to the sample given. Forward slashes are accepted going in; Live reports the path back
+    with backslashes. On a slot that already holds a clip it raises 'This clip slot already
+    has a clip' rather than replacing.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: file_path, kind: str, required: true}
+
+- id: clip_slot.delete_clip
+  path: song.tracks[{track}].clip_slots[{slot}]
+  access: [call]
+  method: delete_clip
+  destructive: true
+  verify: no_clip
+  status: verified
+  doc: >-
+    Delete the clip in this slot. Raises on an empty slot, so check clip_slot.has_clip
+    first. Destructive, and not as cheap to undo as it looks: clip envelopes live inside
+    the clip, so deleting a clip to fix a wrong note list throws its automation away too.
+    Measured guidance - replace the note list instead (notes_set with mode replace);
+    delete-and-recreate means the whole automation stage runs again. Whether song.undo()
+    recovers it is untested. Call verified 2026-08-30 against Live 12.4.5,
+    on a scratch track created and deleted for the purpose. It ran and did
+    what it says.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.fire
+  path: song.tracks[{track}].clip_slots[{slot}]
+  access: [call]
+  method: fire
+  destructive: false
+  verify: playing_state
+  status: verified
+  doc: >-
+    Launch this slot. On an empty slot that has a stop button, this stops the track
+    instead of starting anything. The call returns immediately; with global quantization
+    on the clip starts at the next boundary, so an instant read shows is_playing false and
+    is_triggered true - verify against both. The optional record_length and
+    launch_quantization arguments exist in newer Live versions and are safe to omit;
+    neither has been passed through this row. Call verified 2026-08-30 against Live
+    12.4.5, on a scratch track created and deleted for the purpose. It ran and did what it
+    says.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: record_length, kind: float, required: false}
+    - {name: launch_quantization, kind: int, required: false}
+
+- id: clip_slot.stop
+  path: song.tracks[{track}].clip_slots[{slot}]
+  access: [call]
+  method: stop
+  destructive: false
+  verify: playing_state
+  status: verified
+  doc: >-
+    Stop the clip playing in this slot. It stops the track's Session playback as a whole,
+    not just this cell - a track plays at most one Session clip at a time. Call verified
+    2026-08-30 against Live 12.4.5, on a scratch track created
+    and deleted for the purpose. It ran and did what it says.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip_slot.set_fire_button_state
+  path: song.tracks[{track}].clip_slots[{slot}]
+  access: [call]
+  method: set_fire_button_state
+  destructive: false
+  verify: playing_state
+  status: broken
+  doc: >-
+    Hold or release the slot's fire button the way a control surface would. True
+    presses, False releases. This is what makes momentary Gate and Repeat launch
+    modes reachable from a script at all - fire() cannot express "still held".
+    Leaving it True is a stuck button; always release.
+    REFUSED by this script's allowlist, by design - see scene.set_fire_button_state. Measured
+    2026-08-30 against Live 12.4.5; the call answered method_not_allowed by name.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: state, kind: bool, required: true}
+
+- id: clip_slot.duplicate_clip_to
+  path: song.tracks[{track}].clip_slots[{slot}]
+  access: [call]
+  method: duplicate_clip_to
+  destructive: false
+  verify: has_clip
+  status: verified
+  doc: >-
+    Copy this slot's clip into another clip slot, given as a slot handle. Copies the clip
+    WITH its envelopes, which is the cheap way to get two sections that share notes but
+    need different automation. Related measured guidance: two sections that reuse one
+    Session slot also share that slot's envelopes, so a section needing a different filter
+    sweep needs its own clip, not a re-fire of the same one. Whether the target slot must
+    be empty is not measured. Call verified 2026-08-30 against Live 12.4.5, on a scratch
+    track created and deleted for the purpose. It ran and did what it says.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: target_clip_slot, kind: object, required: true}
+
+- id: clip_slot.highlighted
+  path: song.view.highlighted_clip_slot
+  access: [get, set, observe]
+  kind: object
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    The clip slot the human currently has selected in the Session view, as a handle. The
+    entry point for "act on what I am looking at" without asking for indices. Writable,
+    which moves the selection box. Also mirrored in the view area of the catalog if one
+    exists; it is repeated here because it is the natural way into a clip slot.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+# =====================================================================
+# clip - a Session clip, reached through its clip slot
+#
+# Every path in this area is song.tracks[{track}].clip_slots[{slot}].clip...,
+# so every row takes both `track` and `slot`. The Arrangement copies of these
+# same properties are in the arrangement_clip area below; they are the same
+# class, a different route, and not always the same behaviour.
+# =====================================================================
+
+# ---- identity and type ----------------------------------------------
+
+- id: clip.name
+  path: song.tracks[{track}].clip_slots[{slot}].clip.name
+  access: [get, set, observe]
+  kind: str
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    The clip's name as shown on its title bar. Free text; Live does not enforce
+    uniqueness, so a name is a label for humans and never a reliable key - index by track
+    and slot instead. An audio clip that has not been renamed shows the file name, but
+    reading `name` back after a rename is the only proof the rename landed.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.color
+  path: song.tracks[{track}].clip_slots[{slot}].clip.color
+  access: [get, set, observe]
+  kind: int
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip colour as a packed integer, 0x00RRGGBB. Live 11 and later accept arbitrary RGB;
+    earlier versions snap to the 70-entry palette, which this installation cannot show,
+    and the lom_set read-back is what exposes a snap, since Live reports no error for one.
+    Setting the colour does not touch the clip slot's own colour property independently;
+    they are expected to track each other.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.color_index
+  path: song.tracks[{track}].clip_slots[{slot}].clip.color_index
+  access: [get, set, observe]
+  kind: int
+  range: [0, 69]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip colour as an index into Live's palette rather than raw RGB. Prefer this over
+    clip.color when the intent is "one of Live's colours" - it cannot land on a shade Live
+    will silently round. The upper bound of 69 is the documented palette size; no write
+    has probed what happens past it.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.is_midi_clip
+  path: song.tracks[{track}].clip_slots[{slot}].clip.is_midi_clip
+  access: [get]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this clip holds MIDI notes. The guard before any note operation and before
+    velocity_amount - on an audio clip those paths raise rather than return empty.
+    Mutually exclusive with clip.is_audio_clip.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.is_audio_clip
+  path: song.tracks[{track}].clip_slots[{slot}].clip.is_audio_clip
+  access: [get]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this clip holds a sample. The guard before warping, warp_mode, pitch_coarse,
+    pitch_fine, gain, ram_mode and file_path - all of which are audio-only and are
+    expected to raise on a MIDI clip. Check this before reaching for any of them; a raise
+    inside Live's process is what the resolver exists to avoid.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.is_arrangement_clip
+  path: song.tracks[{track}].clip_slots[{slot}].clip.is_arrangement_clip
+  access: [get]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this clip lives on the Arrangement timeline. Reached through a clip slot it is
+    expected to be false, always - a Session clip by construction. It is worth reading
+    anyway when a clip handle has been passed around, because it is the one property that
+    tells you whether automation_envelope() will return an envelope or None.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.file_path
+  path: song.tracks[{track}].clip_slots[{slot}].clip.file_path
+  access: [get]
+  kind: str
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Absolute path of the sample behind an audio clip. Read-only - there is no LOM way to
+    repoint a clip at a different file, so replacing a sample means delete_clip plus
+    create_audio_clip, which loses the clip's envelopes. Raises on a MIDI clip; check
+    clip.is_audio_clip first.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.sample_length
+  path: song.tracks[{track}].clip_slots[{slot}].clip.sample_length
+  access: [get]
+  kind: int
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Length of the underlying sample in SAMPLE FRAMES, not beats and not seconds (the
+    catalog's unit vocabulary has no entry for frames). Divide by clip.sample_rate for
+    seconds. This is the honest number to compare against clip.length when testing for
+    auto-warp: seconds * bpm / 60 is what the clip should measure in beats, and a
+    deviation over 2 percent means Live warped it. Audio clips only.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.sample_rate
+  path: song.tracks[{track}].clip_slots[{slot}].clip.sample_rate
+  access: [get]
+  kind: int
+  unit: hz
+  verify: read_back
+  status: verified
+  doc: >-
+    Sample rate of the underlying file in Hz - the file's own rate, not the audio
+    interface's. Needed to turn clip.sample_length into seconds. Audio clips only.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+# ---- playback state -------------------------------------------------
+
+- id: clip.is_playing
+  path: song.tracks[{track}].clip_slots[{slot}].clip.is_playing
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the clip is sounding. Documented as writable, which makes it a second route to
+    starting and stopping a clip alongside fire() and stop() - whether the write actually
+    launches, and whether it respects launch quantization, is not measured. Prefer
+    clip_slot.fire until that is settled. Reads false while the clip
+    is merely triggered; see clip.is_triggered.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.is_triggered
+  path: song.tracks[{track}].clip_slots[{slot}].clip.is_triggered
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the clip is armed and waiting for the next quantization boundary. A verify
+    that checks only is_playing immediately after a fire will read false on any set with
+    global quantization on, and report a failure that is not one.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.is_recording
+  path: song.tracks[{track}].clip_slots[{slot}].clip.is_recording
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the clip is currently capturing input. Distinct from overdubbing: recording is
+    the first pass that creates material, overdubbing adds to existing material. Never
+    write notes into a recording clip - the results interleave unpredictably.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.is_overdubbing
+  path: song.tracks[{track}].clip_slots[{slot}].clip.is_overdubbing
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the clip is in MIDI overdub - recording on top of what is already there. Read
+    it before any notes_set: a replace that lands mid-overdub races against Live's own
+    writer, and neither side reports the collision.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.will_record_on_start
+  path: song.tracks[{track}].clip_slots[{slot}].clip.will_record_on_start
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether launching this clip will start a recording rather than a playback. The same
+    question clip_slot.will_record_on_start answers, asked of the clip.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.playing_position
+  path: song.tracks[{track}].clip_slots[{slot}].clip.playing_position
+  access: [get, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Current playhead position inside the clip, in clip-local beats. Meaningless while the
+    clip is not playing (expected to hold the last value rather than reset; which of the
+    two it does is not measured).
+    Observing this fires very often; registering a listener on it across many clips is
+    exactly the cost docs/limits.md §5, "Cost of introspection and of listeners", flags
+    as unmeasured in a real-time audio process.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+# ---- time, loop and markers -----------------------------------------
+
+- id: clip.length
+  path: song.tracks[{track}].clip_slots[{slot}].clip.length
+  access: [get, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip length in beats. Read-only and derived: for a looping clip it is loop_end minus
+    loop_start, otherwise end_marker minus start_marker. Measured trap, and the reason
+    this row matters more than it looks - this number is how you detect that Live auto-
+    warped an imported audio file. Expected beats = seconds * bpm / 60; four 311.7 s files
+    at 124 BPM should each have been 644.2 and reported 318.08, 586.13, 350.70, 931.17.
+    Second half of the trap: warp analysis is asynchronous, so immediately after
+    create_audio_clip this still reports the raw length. Poll until two consecutive reads
+    agree before judging.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.loop_start
+  path: song.tracks[{track}].clip_slots[{slot}].clip.loop_start
+  access: [get, set, observe, automate]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Start of the loop brace, in clip-local beats. For an audio clip the value is in beats
+    of the clip's own timeline, which for a warped clip is not proportional to seconds in
+    the file. Writing a loop_start beyond loop_end is expected to be clamped rather than
+    rejected - the lom_set read-back reports the clamp. On an unlooped clip this is still
+    writable and still means the loop brace; the audible start is start_marker.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.loop_end
+  path: song.tracks[{track}].clip_slots[{slot}].clip.loop_end
+  access: [get, set, observe, automate]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    End of the loop brace, in clip-local beats. Together with loop_start this is what
+    clip.length reports for a looping clip. Order matters when growing a loop: set
+    loop_end before loop_start when moving the brace later, otherwise the intermediate
+    state is invalid and Live clamps - which the read-back will show as a value you did
+    not ask for.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.looping
+  path: song.tracks[{track}].clip_slots[{slot}].clip.looping
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the clip loops. Switching it changes what clip.length means - loop brace when
+    true, start/end markers when false - so read length again after writing this, not
+    before. An unwarped audio clip cannot loop meaningfully; Live is expected to allow the
+    flag anyway.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.start_marker
+  path: song.tracks[{track}].clip_slots[{slot}].clip.start_marker
+  access: [get, set, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Where playback begins when the clip is launched, in clip-local beats. Not the same as
+    loop_start: the start marker is the entry point, the loop brace is what repeats. On a
+    looping clip they are often but not necessarily equal. Writing past end_marker is
+    expected to clamp.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.end_marker
+  path: song.tracks[{track}].clip_slots[{slot}].clip.end_marker
+  access: [get, set, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Where playback stops on a non-looping clip, in clip-local beats. On a looping clip it
+    bounds the material but the loop brace decides what repeats. This and start_marker are
+    what clip.crop() collapses the clip to.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.position
+  path: song.tracks[{track}].clip_slots[{slot}].clip.position
+  access: [get, set, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Position of the loop brace as a whole, in clip-local beats. Writing it moves
+    loop_start and loop_end together, keeping the loop length - the difference from
+    writing loop_start, which changes the length. The exact interaction with an unlooped
+    clip is not measured.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.start_time
+  path: song.tracks[{track}].clip_slots[{slot}].clip.start_time
+  access: [get]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Start of the clip on its own timeline. For a Session clip this is expected to be 0.0
+    and carries little information; it is the Arrangement copy of this property that means
+    something (position on the song timeline). Read-only as documented - see
+    arrangement_clip.start_time for why that limitation costs something.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.end_time
+  path: song.tracks[{track}].clip_slots[{slot}].clip.end_time
+  access: [get]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    End of the clip on its own timeline; read-only. For a Session clip this is expected to
+    equal clip.length. Its value is on the Arrangement route, where it is the clip's end
+    on the song timeline.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.signature_numerator
+  path: song.tracks[{track}].clip_slots[{slot}].clip.signature_numerator
+  access: [get, set, observe]
+  kind: int
+  range: [1, 99]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    Top number of the clip's own time signature - what its grid is drawn in. This is per
+    clip and independent of the song signature, which is why a 3/4 clip can sit in a 4/4
+    set. It changes the display and the quantize grid; it does not move any note. The
+    range shown is Live's documented input limit; no write has probed it.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.signature_denominator
+  path: song.tracks[{track}].clip_slots[{slot}].clip.signature_denominator
+  access: [get, set, observe]
+  kind: int
+  enum: [1, 2, 4, 8, 16]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    Bottom number of the clip's time signature. Must be a power of two; the enum lists the
+    values Live's own signature control offers. Anything else is expected to be rejected
+    or clamped - the read-back is what proves which.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+# ---- audio: gain, warp, pitch ---------------------------------------
+#
+# The three rows marked CENTRAL CLAIM below are the ones docs/architecture.md
+# section 3 stakes the whole design on. They are the first thing
+# scripts/probe_paths.py should settle, before any other row in any file.
+
+- id: clip.gain
+  path: song.tracks[{track}].clip_slots[{slot}].clip.gain
+  access: [get, set, observe]
+  kind: float
+  range: [0.0, 1.0]
+  unit: normalized
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip gain, normalised 0.0..1.0. NOT dB and not linear - the readable dB figure is
+    clip.gain_display_string, which is a separate property because a Clip is not a
+    DeviceParameter and lom_get therefore returns no `display` field for it
+    (docs/protocol.md section 5.3). Audio clips only. Related measured trap from the
+    mixing side: -70 dB is not -infinity, and a silence check that treats it as such
+    passes on material that is still audible in a dense mix. Read gain_display_string
+    rather than reasoning about the raw number.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.gain_display_string
+  path: song.tracks[{track}].clip_slots[{slot}].clip.gain_display_string
+  access: [get, observe]
+  kind: str
+  unit: db
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip gain as the string Live shows, e.g. "-6.0 dB". Read-only, and the only honest way
+    to turn clip.gain into a physical figure - the 0..1 mapping is not documented and must
+    not be guessed at. To hit a target in dB, write clip.gain, read this back, and bisect;
+    that is the same technique that works for any plugin parameter that reports a display
+    value.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.ram_mode
+  path: song.tracks[{track}].clip_slots[{slot}].clip.ram_mode
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Load this clip's sample fully into RAM instead of streaming from disk. Audio clips
+    only. Costs memory, buys reliability on a slow disk. It changes nothing audible, so
+    there is nothing to verify beyond the read-back.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.warping
+  path: song.tracks[{track}].clip_slots[{slot}].clip.warping
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    CENTRAL CLAIM (docs/architecture.md, "the restart tax"). Warp on or off for an audio
+    clip. The LOM exposes it as a writable property. Why it matters beyond one switch: an
+    imported audio file may arrive warped at a tempo Live guessed from transients
+    (measured - four identical 311.7 s renders at 124 BPM reported 318.08, 586.13, 350.70
+    and 931.17 beats instead of 644.2), the clip then plays at the wrong speed, and any
+    clip envelope written onto it is silently truncated to the wrong length. Without this
+    row the only repair is a human clicking the Warp switch. Warp analysis is also
+    asynchronous, so read clip.length twice and wait for agreement before deciding whether
+    a clip needs this at all.
+    Measured 2026-08-29 against Live 12.4.5: read True, wrote False, read back False,
+    restored.
+    Toggling this MOVES the clip's time fields, so nothing read before the toggle can be
+    trusted after it. Measured 2026-08-30 against Live 12.4.5 on a 1.14-unit audio clip at 120
+    BPM: turning warping on took loop_end from 0.5704 to 1.1408 and end_marker from 1.1408 to
+    2.2816 - both exactly doubled - while length did not follow. At 60 BPM the same toggle
+    changed neither, which is what a seconds-to-beats conversion would look like (one beat is
+    one second there). That reading is not established, and the mechanism is not claimed here;
+    what IS established is that the numbers move with the tempo in play. Re-read loop_start,
+    loop_end, start_marker and end_marker after any write to this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.warp_mode
+  path: song.tracks[{track}].clip_slots[{slot}].clip.warp_mode
+  access: [get, set, observe]
+  kind: enum
+  enum: [0, 1, 2, 3, 4, 5, 6]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  means:
+    "0": >-
+      beats
+    "1": >-
+      tones
+    "2": >-
+      texture
+    "3": >-
+      repitch
+    "4": >-
+      complex
+    "5": >-
+      rex
+    "6": >-
+      complex_pro
+  doc: >-
+    CENTRAL CLAIM (docs/architecture.md, "the restart tax"). The clip's warp algorithm, as
+    an integer. The LOM exposes it as a writable property. The mapping in Live's own order
+    is 0 Beats, 1 Tones, 2 Texture, 3 Re-Pitch, 4 Complex, 5 REX, 6 Complex Pro; that
+    mapping is read from Live's documentation and has NOT been read back from a running
+    instance, so treat the numbers as a hypothesis and confirm against
+    clip.available_warp_modes, which is the authoritative per-clip list. Only meaningful
+    while clip.warping is true.
+    Musically: Beats for drums, Complex Pro for vocals and full mixes, Re-Pitch when a
+    tape-style pitch shift is wanted.
+    Measured 2026-08-29 against Live 12.4.5: read 0, wrote 4, read back 4, restored.
+    Value names read off Live.Clip.WarpMode through the enum_names handler (docs/protocol.md
+    section 5.12), measured 2026-08-31 against Live 12.4.5 - not transcribed from a reference.
+    Cycling 74's LOM documentation agrees.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.pitch_coarse
+  path: song.tracks[{track}].clip_slots[{slot}].clip.pitch_coarse
+  access: [get, set, observe]
+  kind: int
+  range: [-48, 48]
+  unit: semitones
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    CENTRAL CLAIM (docs/architecture.md, "the restart tax"). Transpose an audio clip in
+    whole semitones. The LOM exposes it as a writable property. Audio clips only; MIDI
+    transposition is a note operation, not this. The range -48..+48 is Live's documented
+    limit; nothing has written past it. How the shift sounds depends on clip.warp_mode -
+    under Re-Pitch it also changes the playback speed, under Complex Pro it does not.
+    Measured 2026-08-29 against Live 12.4.5: read 0, wrote 3, read back 3, restored.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.pitch_fine
+  path: song.tracks[{track}].clip_slots[{slot}].clip.pitch_fine
+  access: [get, set, observe]
+  kind: float
+  range: [-50.0, 49.0]
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Fine detune of an audio clip in CENTS (hundredths of a semitone - the catalog unit
+    vocabulary has no entry for cents, hence unit none). Adds to clip.pitch_coarse. The
+    range -50..+49 is Live's documented limit, not a measured one. Like pitch_coarse it is
+    expected to be writable through the LOM, which no write here has confirmed.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.available_warp_modes
+  path: song.tracks[{track}].clip_slots[{slot}].clip.available_warp_modes
+  access: [get]
+  kind: list
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    The warp modes this particular clip actually offers, as a list of integers.
+    Authoritative where the enum on clip.warp_mode is a hypothesis: not every mode is
+    available for every file (REX in particular exists only for .rx2 material). Read this
+    before writing warp_mode rather than trusting the documented ordering. Live 11 and
+    later.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.warp_markers
+  path: song.tracks[{track}].clip_slots[{slot}].clip.warp_markers
+  access: [get]
+  kind: list
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    The clip's warp markers, each pairing a beat time with a sample time. Read-only as a
+    collection; individual markers are moved with clip.move_warp_marker. This is what
+    Live's asynchronous auto-warp analysis produces, so an empty or one-entry list right
+    after an import usually means the analysis has not finished, not that the clip is
+    unwarped. Live 11 and later.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+# ---- MIDI-side properties -------------------------------------------
+
+- id: clip.muted
+  path: song.tracks[{track}].clip_slots[{slot}].clip.muted
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Deactivate the clip - Live's clip-level mute, drawn as a greyed-out clip. Independent
+    of the track's mute and of the mixer. A muted clip still occupies its slot, still
+    fires, and still reports is_playing; it simply produces nothing. Worth checking when a
+    clip verifies correctly and is inaudible.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.velocity_amount
+  path: song.tracks[{track}].clip_slots[{slot}].clip.velocity_amount
+  access: [get, set, observe]
+  kind: float
+  range: [0.0, 1.0]
+  unit: normalized
+  verify: read_back
+  status: verified
+  doc: >-
+    How strongly note velocity modulates the clip's output volume, 0.0..1.0. MIDI clips
+    only. At 0 the velocities in the note list still exist and still reach the instrument,
+    they just stop affecting clip level - which is why a humanised velocity curve can be
+    present in the notes and inaudible at the output. Check this before concluding that a
+    velocity pass did not land.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+# ---- launch behaviour ------------------------------------------------
+
+- id: clip.legato
+  path: song.tracks[{track}].clip_slots[{slot}].clip.legato
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Legato launch: when this clip is fired it starts at the playing position of the clip
+    it replaces instead of at its own start marker. The property that makes two clips of
+    the same length swap without a rhythmic seam. Affects launching only - it changes
+    nothing about a clip already playing.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.launch_mode
+  path: song.tracks[{track}].clip_slots[{slot}].clip.launch_mode
+  access: [get, set, observe]
+  kind: enum
+  enum: [0, 1, 2, 3]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  means:
+    "0": >-
+      trigger
+    "1": >-
+      gate
+    "2": >-
+      toggle
+    "3": >-
+      repeat
+  doc: >-
+    How the clip responds to its launch button, as an integer. Live's order is 0 Trigger,
+    1 Gate, 2 Toggle, 3 Repeat; that mapping is taken from Live's documentation and has
+    not been read back from a running instance. Gate and Repeat need a held button, which
+    fire() cannot express - use clip_slot.set_fire_button_state for those, and remember to
+    release.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+    Value names read off Live.Clip.LaunchMode through the enum_names handler (docs/protocol.md
+    section 5.12), measured 2026-08-31 against Live 12.4.5 - not transcribed from a reference.
+    Cycling 74's LOM documentation agrees.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.launch_quantization
+  path: song.tracks[{track}].clip_slots[{slot}].clip.launch_quantization
+  access: [get, set, observe]
+  kind: enum
+  enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  means:
+    "0": >-
+      q_global - follow song.clip_trigger_quantization; this is the default
+    "1": >-
+      q_none - fire immediately, no quantisation
+    "2": >-
+      q_8_bars
+    "3": >-
+      q_4_bars
+    "4": >-
+      q_2_bars
+    "5": >-
+      q_bar - one bar
+    "6": >-
+      q_half - 1/2
+    "7": >-
+      q_half_triplet - 1/2 triplet
+    "8": >-
+      q_quarter - 1/4
+    "9": >-
+      q_quarter_triplet - 1/4 triplet
+    "10": >-
+      q_eighth - 1/8
+    "11": >-
+      q_eighth_triplet - 1/8 triplet
+    "12": >-
+      q_sixteenth - 1/16
+    "13": >-
+      q_sixteenth_triplet - 1/16 triplet
+    "14": >-
+      q_thirtysecond - 1/32
+  doc: >-
+    Per-clip launch quantization, overriding the song's global setting. Whatever is written here
+    decides how long fire() waits before is_playing becomes true. This is NOT the same enum as
+    song.clip_trigger_quantization. That property reads Live.Song.Quantization, which opens with
+    q_no_q at 0; this one reads Live.Clip.ClipLaunchQuantization, which opens with q_global at 0
+    and q_none at 1. For every member the two share the clip value is the song value PLUS ONE -
+    one bar is 4 there and 5 here - so a value carried from one property to the other mis-sets
+    it silently. The spellings differ as well: the song enum has q_eight, q_sixtenth and
+    q_thirtytwoth where this one has q_eighth, q_sixteenth and q_thirtysecond. One shared table
+    cannot serve both. Read verified 2026-08-29 against Live 12.4.5. Write measured 2026-09-01
+    against Live 12.4.5 on a MIDI clip created for the test: 0, 1, 5 and 14 each applied
+    exactly, clamped false and changed true. An out-of-range value is REFUSED rather than
+    clamped or ignored - 15, 99 and -1 each came back as type_error "Invalid launch quantization
+    N" with the stored value untouched. A wrong number here therefore fails loudly, unlike a
+    continuous quantised parameter that snaps in silence. The test clip was deleted afterwards.
+    Value names read off Live.Clip.ClipLaunchQuantization through the enum_names handler
+    (docs/protocol.md section 5.12), measured 2026-09-01 against Live 12.4.5 - not transcribed
+    from a reference.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.groove
+  path: song.tracks[{track}].clip_slots[{slot}].clip.groove
+  access: [get, set, observe]
+  kind: object
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    The groove applied to this clip, as a handle to an object in the song's groove pool,
+    or None. Writing it takes a groove handle - not a name and not an index - so the
+    sequence is: read song.groove_pool.grooves, pick one, write the handle here. Setting
+    None removes the groove; no write has been made here. docs/architecture.md, "the
+    catalog" lists the whole groove pool as unproven.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.has_groove
+  path: song.tracks[{track}].clip_slots[{slot}].clip.has_groove
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether a groove is assigned to this clip. Cheaper and safer to poll than clip.groove,
+    which returns a handle that has to be resolved. Note that a groove changes what is
+    heard without changing a single note in the clip - so a notes_get that looks perfectly
+    quantised can still swing.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+# ---- envelopes: presence -------------------------------------------
+
+- id: clip.has_envelopes
+  path: song.tracks[{track}].clip_slots[{slot}].clip.has_envelopes
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this clip carries any clip automation at all. The cheap first question before
+    automation_read, which has to sample. Measured context for why this matters: in a
+    corpus of 174 projects only 52 (30 percent) had clip envelopes while 159 (91 percent)
+    had track automation - so a survey that counts only this property concludes
+    professional sets are unautomated, and is wrong about 110 of them. Track automation is
+    not visible from here at all; it needs Channel B, the .als file (docs/limits.md).
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+# ---- clip view (what the editor shows) -------------------------------
+
+- id: clip.view_grid_quantization
+  path: song.tracks[{track}].clip_slots[{slot}].clip.view.grid_quantization
+  access: [get, set, observe]
+  kind: int
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    The editing grid shown for this clip, as an integer from Live's grid quantization
+    enum. The numeric mapping is not asserted here. This is a display and snapping
+    setting; it does not move notes and is not what clip.quantize() uses (that takes its
+    grid as an argument). It sits on Clip.View here, and may live directly on Clip in
+    other Live versions.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.view_grid_is_triplet
+  path: song.tracks[{track}].clip_slots[{slot}].clip.view.grid_is_triplet
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the editing grid is in triplets. Same caveat as clip.view_grid_quantization: a
+    display setting, not a transformation.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.detail
+  path: song.view.detail_clip
+  access: [get, set, observe]
+  kind: object
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    The clip currently open in Live's detail view - the one the human is looking at, as a
+    handle. Writable, which opens a clip in the editor. This is the entry point for "work
+    on the clip in front of me" instead of asking for a track and slot index, and it is
+    the only path in this file that reaches a clip without knowing where it lives. It may
+    also appear in the view area of the catalog; it is repeated here because it is a clip
+    entry point.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+
+# ---- clip methods: transport ----------------------------------------
+
+- id: clip.fire
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: fire
+  destructive: false
+  verify: playing_state
+  status: verified
+  doc: >-
+    Launch this clip. Equivalent to clip_slot.fire for an occupied slot; prefer the slot
+    form, because it also works when the slot is empty (where it stops the track) and
+    because it does not need the clip to exist first. Subject to launch quantization, so
+    is_playing may still be false immediately afterwards while is_triggered is true. Call
+    verified 2026-08-30 against Live 12.4.5, on a scratch track
+    created and deleted for the purpose. It ran and did what it says.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.stop
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: stop
+  destructive: false
+  verify: playing_state
+  status: verified
+  doc: >-
+    Stop this clip. Like fire, it is subject to the track's launch quantization, so the
+    stop can be pending rather than immediate. Call verified 2026-08-30 against Live
+    12.4.5, on a scratch track created and deleted for the
+    purpose. It ran and did what it says.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.set_fire_button_state
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: set_fire_button_state
+  destructive: false
+  verify: playing_state
+  status: verified
+  doc: >-
+    Hold (True) or release (False) the clip's launch button, as a control surface would.
+    The only way to drive Gate and Repeat launch modes, which need a held button. Always
+    release what you hold - a stuck True is a clip that never stops. Call verified
+    2026-08-30 against Live 12.4.5, on a scratch track created
+    and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: state, kind: bool, required: true}
+
+- id: clip.move_playing_pos
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: move_playing_pos
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Jump the clip's playhead by a relative number of beats while it plays. Negative moves
+    backwards. Does nothing on a stopped clip. Verifiable only by reading
+    clip.playing_position immediately afterwards, and that value moves on its own, so
+    treat any check as approximate. Call verified 2026-08-30 against Live 12.4.5, on a scratch
+    track created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: beats, kind: float, required: true}
+
+- id: clip.scrub
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: scrub
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Start scrubbing the clip from an absolute clip-local beat position - the audible drag
+    through the material Live performs when a user scrubs the clip ruler. Keeps scrubbing
+    until clip.stop_scrub is called; leaving it running is a stuck sound. Not a way to set
+    the play position: use clip.move_playing_pos for that. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted
+    for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: beat_time, kind: float, required: true}
+
+- id: clip.stop_scrub
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: stop_scrub
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    End a scrub started with clip.scrub. Harmless when nothing is scrubbing. Always pair
+    it with the scrub call, including on the error path. Call verified 2026-08-30 against
+    Live 12.4.5, on a scratch track created and deleted for the
+    purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+# ---- clip methods: shaping the clip ---------------------------------
+
+- id: clip.quantize
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: quantize
+  destructive: false
+  verify: notes_count
+  status: verified
+  doc: >-
+    Quantize the clip's notes to a grid. `quantization_grid` is Live's grid enum as an
+    integer (mapping not asserted here); `amount` is 0.0..1.0, where 1.0 snaps hard and
+    lower values pull partway, which is what preserves a human feel. MIDI clips only. It
+    moves notes irreversibly within the clip - the note count does not change, so a count
+    check proves nothing; read the notes back with notes_get if the exact result matters.
+    Quantizing after a humanisation pass undoes the humanisation, so order the two
+    deliberately. Call verified 2026-08-30 against Live 12.4.5,
+    on a scratch track created and deleted for the purpose. It ran and did
+    what it says.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: quantization_grid, kind: int, required: true}
+    - {name: amount, kind: float, required: true}
+
+- id: clip.quantize_pitch
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: quantize_pitch
+  destructive: false
+  verify: notes_count
+  status: verified
+  doc: >-
+    Quantize only the notes of one pitch, leaving the rest of the clip alone - the way to
+    tighten a hi-hat row without touching the kick. Takes the MIDI note number, then the
+    same grid and amount as clip.quantize. MIDI clips only. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted for the purpose. It ran
+    and did what it says.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: pitch, kind: int, required: true}
+    - {name: quantization_grid, kind: int, required: true}
+    - {name: amount, kind: float, required: true}
+
+- id: clip.crop
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: crop
+  destructive: true
+  verify: clip_length
+  status: verified
+  doc: >-
+    Discard everything outside the loop brace and keep only what is inside. Destructive and not
+    undoable through this API - material outside the loop is gone from the clip (the source file
+    is untouched for audio, but a MIDI clip loses those notes). Check clip.loop_start and
+    clip.loop_end before calling, not after. Clip envelopes are cropped with the clip, which is
+    a second way an automation curve can quietly become shorter than it was. Call verified
+    2026-08-30 against Live 12.4.5, on a scratch track created and deleted for the purpose. It
+    ran and did what it says. Destroys everything outside the loop brace and there is no undo
+    through this path beyond Live's own.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.duplicate_loop
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: duplicate_loop
+  destructive: false
+  verify: clip_length
+  status: verified
+  doc: >-
+    Double the loop length and copy the existing material into the new half - the scripted
+    form of Live's Duplicate Loop button, the usual way to grow a 4-bar idea into 8 bars
+    with something to edit in the second half. Not undoable through this API; verify by
+    reading clip.length, which should have doubled. Clip envelopes are expected to be
+    duplicated along with the notes; that half is not measured. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted for the purpose. It ran
+    and did what it says.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.duplicate_region
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: duplicate_region
+  destructive: false
+  verify: notes_count
+  status: verified
+  doc: >-
+    Copy a beat range of the clip to another position inside the same clip, optionally
+    transposing the copy. The argument list given here - region_start, region_length,
+    destination_time, transposition_amount - is taken from Live's documentation; the exact
+    arity has varied between Live versions, and the fourth argument has not been passed
+    here. Call lom_describe on the clip and check before relying on it. MIDI clips. Call
+    verified 2026-08-30 against Live 12.4.5, on a scratch track created and deleted for
+    the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: region_start, kind: float, required: true}
+    - {name: region_length, kind: float, required: true}
+    - {name: destination_time, kind: float, required: true}
+    - {name: transposition_amount, kind: int, required: false}
+
+- id: clip.add_warp_marker
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: add_warp_marker
+  destructive: false
+  verify: warp_state
+  status: broken
+  doc: >-
+    Add a warp marker to an audio clip, pinning a point in the sample to a point on the
+    beat grid. Live 11 and later. This and its siblings are how a wrongly auto-warped
+    import could be repaired from a script rather than by hand - which is why they belong
+    in the catalog even where the generic path cannot reach them. Measured
+    2026-08-30 against Live 12.4.5: the method exists and is on the allowlist, but it is
+    NOT reachable through lom_call. It takes a Live value object (a MidiNoteSpecification,
+    a WarpMarker) that has to be CONSTRUCTED inside Live, and lom_call passes JSON through; Live answers type_error "No registered converter was able to produce...". The
+    {"__path__": ...} form resolves an EXISTING object; it cannot build a new one. Use the
+    notes_set handler instead, which constructs the specifications itself (verified: the
+    same write that failed here succeeded through notes_set). This is the boundary of the
+    generic path and the reason the specialised handlers exist at all.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: warp_marker, kind: object, required: true}
+
+- id: clip.move_warp_marker
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: move_warp_marker
+  destructive: false
+  verify: warp_state
+  status: verified
+  doc: >-
+    Move an existing warp marker, identified by its current beat time, by a beat
+    distance. Live 11 and later. Read clip.warp_markers before and after to see
+    what actually moved.
+    Call verified 2026-08-30 against Live 12.4.5: signature move_warp_marker(double
+    marker_beat_time, double beat_time_distance). The marker at beat 4 was moved to 3 and back
+    to 4, read back each time. The LAST marker of a clip cannot be moved: Live answers 'The
+    shadow marker can't be moved.'
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: marker_beat_time, kind: float, required: true}
+    - {name: beat_time_distance, kind: float, required: true}
+
+- id: clip.remove_warp_marker
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: remove_warp_marker
+  destructive: true
+  verify: warp_state
+  status: verified
+  doc: >-
+    Remove the warp marker at a given beat time. Destructive: warp markers are
+    the clip's timing map, and removing the wrong one re-times everything after
+    it. Live keeps at least one marker, so removing the last is expected to fail
+    rather than unwarp the clip - use clip.warping for that. Live 11 and later.
+    Call verified 2026-08-30 against Live 12.4.5: signature remove_warp_marker(double
+    beat_time). Called with 4 on a warped audio clip; warp_markers read back 3 -> 2. Not
+    undoable from here - add_warp_marker takes a WarpMarker object, which cannot be built over
+    JSON.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: marker_beat_time, kind: float, required: true}
+
+- id: clip.beat_to_sample_time
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: beat_to_sample_time
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Convert a clip-local beat position into a position in the sample, following the clip's
+    warp map. Read-only in effect. This is the honest way to answer "which part of the
+    file is playing at beat 8" on a warped clip, where the relationship is not linear.
+    Audio clips only; Live 11 and later. Call verified 2026-08-30 against Live 12.4.5, on
+    a scratch track created and deleted for the purpose. Audio clips only: a MIDI clip
+    answers live_error "Conversion is only available for audio clips".
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: beat_time, kind: float, required: true}
+
+- id: clip.sample_to_beat_time
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: sample_to_beat_time
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    The inverse of clip.beat_to_sample_time: from a position in the sample to the clip-
+    local beat where it sounds. Audio clips only; Live 11 and later. Call verified
+    2026-08-30 against Live 12.4.5, on a scratch track created and deleted for the
+    purpose. Audio clips only, same refusal on a MIDI clip.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: sample_time, kind: float, required: true}
+
+# ---- clip methods: notes --------------------------------------------
+#
+# These are the LOM's own note methods. The normal route for reading and
+# writing notes is the notes_get / notes_set handler pair (docs/protocol.md
+# section 5.8), which does a real read-modify-write inside Live in one round
+# trip and defaults to replace. The rows below exist because the catalog must
+# describe the surface honestly, and because a caller sometimes needs the
+# primitive. Prefer notes_set.
+
+- id: clip.get_notes_extended
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: get_notes_extended
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Read notes in a pitch and time window, with the Live 11 note extensions (probability,
+    velocity_deviation, release_velocity, note id). Arguments are from_pitch, pitch_span,
+    from_time, time_span - the whole clip is (0, 128, 0.0, clip.length). Times are clip-
+    local beats. Prefer the notes_get handler, which normalises the result into note
+    objects and omits extension fields Live did not supply rather than inventing defaults.
+    Call verified 2026-08-30 against Live 12.4.5: invoked and it
+    answered "2". The call only reads; nothing in the set was changed. Probe it on a MIDI
+    clip: an audio clip answers live_error "Notes are only available in Midi Clips", which
+    is about the clip, not this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: from_pitch, kind: int, required: true}
+    - {name: pitch_span, kind: int, required: true}
+    - {name: from_time, kind: float, required: true}
+    - {name: time_span, kind: float, required: true}
+
+- id: clip.get_selected_notes_extended
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: get_selected_notes_extended
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Read only the notes currently selected in Live's editor. The bridge between what a
+    human has highlighted on screen and what a script operates on - "transpose what I
+    selected" is this call followed by clip.apply_note_modifications. Live 11 and later.
+    Call verified 2026-08-30 against Live 12.4.5:
+    invoked and it answered "0". The call only reads; nothing in the set was
+    changed. Returns what is selected in the clip view, so 0 is the normal answer for a
+    clip nobody has clicked into.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.add_new_notes
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: add_new_notes
+  destructive: false
+  verify: notes_count
+  status: broken
+  doc: >-
+    Add notes to the clip without removing anything - the Live 11 successor to set_notes,
+    and honest about being additive where set_notes was not. Takes a note specification
+    collection. Because it adds, calling it twice with the same material doubles that
+    material; that is the documented behaviour here, not a trap, but the outcome is
+    identical to the set_notes trap. Verify with notes_get, whose count is the clip's
+    count and not the count you sent. Measured 2026-08-30 against Live 12.4.5: the method
+    exists and is on the allowlist, but it is NOT reachable through lom_call. It takes a
+    Live value object (a MidiNoteSpecification, a WarpMarker) that has to be CONSTRUCTED
+    inside Live, and lom_call passes JSON through; Live answers type_error "No
+    registered converter was able to produce...". The {"__path__": ...} form resolves an
+    EXISTING object; it cannot build a new one. Use the notes_set handler instead, which
+    constructs the specifications itself (verified: the same write that failed here
+    succeeded through notes_set). This is the boundary of the generic path and the reason
+    the specialised handlers exist at all.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: notes, kind: list, required: true}
+
+- id: clip.apply_note_modifications
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: apply_note_modifications
+  destructive: false
+  verify: notes_count
+  status: broken
+  doc: >-
+    Write changed notes back by their note id, modifying in place instead of adding. The
+    only note write in the LOM that is genuinely an update: the ids come from
+    get_notes_extended or get_selected_notes_extended, and notes whose ids are not in the
+    list are left untouched. Live 11 and later. Where it holds, this is the primitive
+    behind a safe read-modify-write. Measured 2026-08-30 against
+    Live 12.4.5: the method exists and is on the allowlist, but it is NOT reachable
+    through lom_call. It takes a Live value object (a MidiNoteSpecification, a WarpMarker)
+    that has to be CONSTRUCTED inside Live, and lom_call passes JSON through; Live
+    answers type_error "No registered converter was able to produce...". The {"__path__":
+    ...} form resolves an EXISTING object; it cannot build a new one. Use the notes_set
+    handler instead, which constructs the specifications itself (verified: the same write
+    that failed here succeeded through notes_set). This is the boundary of the generic
+    path and the reason the specialised handlers exist at all.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: notes, kind: list, required: true}
+
+- id: clip.remove_notes_extended
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: remove_notes_extended
+  destructive: true
+  verify: notes_count
+  status: verified
+  doc: >-
+    Delete every note inside a pitch and time window. Arguments are from_pitch,
+    pitch_span, from_time, time_span; the whole clip is (0, 128, 0.0, clip.length).
+    Destructive, and this is the half of a replace that the notes_set handler performs
+    inside Live so that remove and write cannot be interrupted between them. Calling it
+    alone leaves the clip empty until the write lands - which is why notes_set exists.
+    Call verified 2026-08-30 against Live 12.4.5, on a scratch
+    track created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: from_pitch, kind: int, required: true}
+    - {name: pitch_span, kind: int, required: true}
+    - {name: from_time, kind: float, required: true}
+    - {name: time_span, kind: float, required: true}
+
+- id: clip.replace_selected_notes
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: replace_selected_notes
+  destructive: true
+  verify: notes_count
+  status: broken
+  doc: >-
+    Replace the currently selected notes with the given list. Paired with
+    clip.select_all_notes this is the pre-Live-11 way to make set_notes behave like a
+    replace, and skipping it is the direct cause of the doubling trap recorded on
+    clip.set_notes. Destructive: the selection is gone once this returns. Measured 2026-08-30
+    against Live 12.4.5: the method exists and
+    is on the allowlist, but it is NOT reachable through lom_call. It takes a Live value
+    object (a MidiNoteSpecification, a WarpMarker) that has to be CONSTRUCTED inside Live,
+    and lom_call passes JSON through; Live answers type_error "No registered converter
+    was able to produce...". The {"__path__": ...} form resolves an EXISTING object; it
+    cannot build a new one. Use the notes_set handler instead, which constructs the
+    specifications itself (verified: the same write that failed here succeeded through
+    notes_set). This is the boundary of the generic path and the reason the specialised
+    handlers exist at all.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: notes, kind: list, required: true}
+
+- id: clip.set_notes
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: set_notes
+  destructive: true
+  verify: notes_count
+  status: broken
+  doc: >-
+    MEASURED TRAP - the name is wrong. Clip.set_notes() APPENDS. It does not
+    replace, even though the name and Live's own API description both suggest it
+    does. Measured at the artefact, not inferred: seven lead clips of 63
+    humanised notes each, then a second call sending a different 23-note melody
+    to the same clip, left 86 notes in the clip - two melodies stacked in bars
+    1-4 - and the call reported 23, the length of the list it was given, not the
+    length of the clip. A second call is never a correction; it is a duplication
+    that reports success. Marked destructive so the executor demands confirm=True
+    before it can be reached at all. The right route is the notes_set handler,
+    which defaults to mode replace and performs remove-then-write inside one
+    handler call (docs/protocol.md section 5.8). Reach for this row only when
+    appending is genuinely what is wanted, and verify with notes_get afterwards.
+    REFUSED by this script's allowlist, by design: Live's legacy note API, deprecated by
+    Ableton. It discards MPE and probability data, and it opens a modal dialog that blocks
+    Live's main thread until a human clicks it (measured 2026-08-29 against Live 12.4.5).
+    Write notes with the notes_set handler, which uses add_new_notes.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: notes, kind: list, required: true}
+
+- id: clip.select_all_notes
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: select_all_notes
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Select every note in the clip. On its own it changes nothing audible; its purpose is
+    to set up clip.replace_selected_notes, which is the classic select-all-then-replace
+    idiom that turns the appending set_notes into a real replace. It also changes what the
+    human sees selected in the editor, so it is not entirely invisible. Call verified
+    2026-08-30 against Live 12.4.5: invoked and it returned
+    without error. The set was restored afterwards where the call had any effect.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.deselect_all_notes
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: deselect_all_notes
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Clear the note selection in the clip. Worth calling after a select-all-then-replace so
+    that the next human action does not land on an invisible full selection. Call verified
+    2026-08-30 against Live 12.4.5: invoked and it returned
+    without error. The set was restored afterwards where the call had any effect.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.get_notes_by_id
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: get_notes_by_id
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Read specific notes by their note ids. Note ids are stable for the lifetime of a note
+    and are what makes a targeted edit possible without a window query. Live 11 and later.
+    Call verified 2026-08-30 against Live 12.4.5:
+    invoked and it answered "1". The call only reads; nothing in the set was
+    changed. Takes a list of note ids, not a single id (passing a bare int answers
+    live_error "'int' object has no attribute '__iter__'"). Note IDs come from notes_get.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: note_ids, kind: list, required: true}
+
+- id: clip.remove_notes_by_id
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: remove_notes_by_id
+  destructive: true
+  verify: notes_count
+  status: verified
+  doc: >-
+    Delete specific notes by note id. The precise counterpart to remove_notes_extended's
+    window: it removes exactly the listed notes and nothing adjacent. This is what a real
+    repair looks like - without it the same job has to be done offline in the .als by
+    tuple comparison; one measured repair removed 23 stray notes from 14 clips that way.
+    Live 11 and later. Call verified 2026-08-30 against Live 12.4.5, on a scratch track
+    created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: note_ids, kind: list, required: true}
+
+- id: clip.duplicate_notes_by_id
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: duplicate_notes_by_id
+  destructive: false
+  verify: notes_count
+  status: verified
+  doc: >-
+    Duplicate specific notes by id, optionally to a new time and with a transposition.
+    Live 11 and later; the argument list beyond the id list has not been passed here, so
+    call lom_describe before relying on the optional ones. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: note_ids, kind: list, required: true}
+    - {name: destination_time, kind: float, required: false}
+    - {name: transposition_amount, kind: int, required: false}
+
+# ---- clip methods: automation ---------------------------------------
+#
+# Automation is not a property, which is why it has its own handlers
+# (automation_read / automation_write / automation_clear, docs/protocol.md
+# section 5.9). The rows here are the LOM primitives underneath them, and the
+# place where the Session-only limitation is recorded.
+
+- id: clip.automation_envelope
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: automation_envelope
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Get the automation envelope for one device parameter, given as a parameter handle, or
+    None when the clip has no curve for it. MEASURED TRAP, and it is the reason the
+    Session and Arrangement routes are separate areas in this file - quoting the Live
+    Object Model: it returns None for Arrangement clips, and None for parameters belonging
+    to a different track. So: write automation into a SESSION clip, then duplicate the
+    clip into the Arrangement. Never the reverse. The envelope object it returns is not
+    path-addressable (it comes from a call, not an attribute), so its own members -
+    value_at_time(), insert_step() - are reached through the automation_* handlers, which
+    sample it because Live cannot enumerate breakpoints. Second measured trap for anyone
+    sampling by hand: at time 0 Live returns the parameter's default value, not the curve,
+    so verify at t greater than 0. Call verified 2026-08-30 against Live 12.4.5, on a scratch
+    track created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: parameter, kind: object, required: true}
+
+- id: clip.create_automation_envelope
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: create_automation_envelope
+  destructive: false
+  verify: envelope_present
+  status: verified
+  doc: >-
+    Create an empty envelope for a device parameter so that steps can be inserted into it.
+    Create an empty envelope for a device parameter so that steps can be inserted into it.
+    Needed because automation_envelope() returns None rather than creating one. The method has
+    not existed in every Live version - treat its presence as version-dependent. Session clips
+    only, for the same reason as automation_envelope. Call verified 2026-08-30 against Live
+    12.4.5, on a scratch track created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: parameter, kind: object, required: true}
+
+- id: clip.clear_envelope
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: clear_envelope
+  destructive: true
+  verify: envelope_absent
+  status: verified
+  doc: >-
+    Delete the envelope for one device parameter. Destructive and the only way to remove a
+    curve - there is no Envelope.clear(); the method lives on the clip, not on the
+    envelope. Measured context for why this matters more than it looks: writing a second
+    sweep onto a parameter that already has one does not merge them, the second replaces
+    the first, and an un-cleared leftover from an earlier run is indistinguishable from an
+    intentional curve. Clear first, then write. Call verified 2026-08-30 against Live
+    12.4.5, on a scratch track created and deleted for the
+    purpose. It ran and did what it says.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: parameter, kind: object, required: true}
+
+- id: clip.clear_all_envelopes
+  path: song.tracks[{track}].clip_slots[{slot}].clip
+  access: [call]
+  method: clear_all_envelopes
+  destructive: true
+  verify: envelope_absent
+  status: verified
+  doc: >-
+    Delete every clip envelope in this clip at once. Destructive, wide, and unrecoverable
+    through this API - it takes curves on devices nobody was thinking about along with the
+    one being fixed. Prefer clip.clear_envelope with the specific parameter. Verify with
+    clip.has_envelopes, which should read false afterwards. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted
+    for the purpose. It ran and did what it says.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.view_show_envelope
+  path: song.tracks[{track}].clip_slots[{slot}].clip.view
+  access: [call]
+  method: show_envelope
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Open the envelope lane in the clip editor. Purely a view action - it changes what a
+    human sees and nothing about the data. Useful at the end of an automation pass so the
+    result is visible rather than merely written. Call verified 2026-08-30 against Live
+    12.4.5, on a scratch track created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.view_hide_envelope
+  path: song.tracks[{track}].clip_slots[{slot}].clip.view
+  access: [call]
+  method: hide_envelope
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Close the envelope lane in the clip editor. View only. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.view_select_envelope_parameter
+  path: song.tracks[{track}].clip_slots[{slot}].clip.view
+  access: [call]
+  method: select_envelope_parameter
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Choose which device parameter's envelope the clip editor shows, given as a parameter
+    handle. View only - it does not create the envelope, so calling it for a parameter
+    with no curve shows an empty lane. Measured context worth knowing when picking the
+    parameter: envelopes belong to a specific device instance, not to "the filter of the
+    track", so the handle must come from the right device in the right chain. Call
+    verified 2026-08-30 against Live 12.4.5, on a scratch track
+    created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+  args:
+    - {name: parameter, kind: object, required: true}
+
+- id: clip.view_show_loop
+  path: song.tracks[{track}].clip_slots[{slot}].clip.view
+  access: [call]
+  method: show_loop
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Scroll the clip editor so the loop brace is in view. View only, no data change. Call
+    verified 2026-08-30 against Live 12.4.5, on a scratch track created and deleted for
+    the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+# =====================================================================
+# arrangement_clip - the same Clip class, reached from the timeline
+#
+# song.tracks[{track}].arrangement_clips[{clip}] ... - every row takes
+# `track` and `clip`, where `clip` is the index in the track's arrangement
+# clip list, NOT a scene number and NOT a slot.
+#
+# Same class, different route, and three differences that matter:
+#
+#   1. Automation. clip.automation_envelope() returns None here, always.
+#      Write in Session, then duplicate. See
+#      arrangement_clip.automation_envelope.
+#   2. Position. start_time and end_time are the clip's place on the song
+#      timeline, and they are read-only - there is no LOM way to slide an
+#      Arrangement clip. Positioning happens at duplication time.
+#   3. Launch. The launch properties (launch_mode, launch_quantization,
+#      legato, the follow actions) exist on the object because it is the
+#      same class, but they govern Session launching. On the timeline they
+#      are expected to be inert. That expectation is not measured; the rows
+#      are present so probe_paths.py can settle it rather than being left
+#      out on a guess.
+#
+# And the trap that decides whether this list exists at all: group tracks
+# have NO arrangement clips, and unguarded iteration over song.tracks raises
+# on the first one (docs/protocol.md section 6, measured).
+# =====================================================================
+
+- id: arrangement_clip.list
+  path: song.tracks[{track}].arrangement_clips
+  access: [get, observe]
+  kind: list
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    All clips on one track's Arrangement timeline, in an order that is expected to follow
+    start_time. Measured trap: group tracks have no arrangement clips at all, and touching
+    this path on one raises - check track.is_foldable first, because an exception inside
+    Live's process kills the socket. This list is also the verification for a duplication
+    pass: read the start_time of every entry, and if they are all 0.0 you have hit the
+    destination_time trap recorded on arrangement_clip.duplicate_from_session.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+
+- id: arrangement_clip.name
+  path: song.tracks[{track}].arrangement_clips[{clip}].name
+  access: [get, set, observe]
+  kind: str
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Name of an Arrangement clip. Free text and not unique; the index in arrangement_clips
+    is the only reliable handle. A clip duplicated from the Session carries the Session
+    clip's name, so a timeline full of identically named clips is normal and not a sign of
+    a failed duplication - check start_time for that.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.color
+  path: song.tracks[{track}].arrangement_clips[{clip}].color
+  access: [get, set, observe]
+  kind: int
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Arrangement clip colour as 0x00RRGGBB. Same behaviour and the same palette-snapping
+    caveat as clip.color; no write has tested either. Colour is the cheapest way to make a
+    section structure legible to the human who has to work in the set afterwards.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.color_index
+  path: song.tracks[{track}].arrangement_clips[{clip}].color_index
+  access: [get, set, observe]
+  kind: int
+  range: [0, 69]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    Arrangement clip colour as a palette index. Preferable to the RGB form when the intent
+    is a colour Live actually has. No write has probed the upper bound.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.is_midi_clip
+  path: song.tracks[{track}].arrangement_clips[{clip}].is_midi_clip
+  access: [get]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this timeline clip holds MIDI notes. The guard before any note operation on
+    it.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.is_audio_clip
+  path: song.tracks[{track}].arrangement_clips[{clip}].is_audio_clip
+  access: [get]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this timeline clip holds a sample. The guard before warping, warp_mode,
+    pitch_coarse, pitch_fine, gain, ram_mode and file_path, all of which are expected to
+    raise on a MIDI clip.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.is_arrangement_clip
+  path: song.tracks[{track}].arrangement_clips[{clip}].is_arrangement_clip
+  access: [get]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Expected to be true for everything reached through this route. Worth reading exactly
+    once in a verification pass, because it is the property that predicts whether
+    automation_envelope() will return an envelope or None - and that single distinction is
+    the reason this area exists separately.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.file_path
+  path: song.tracks[{track}].arrangement_clips[{clip}].file_path
+  access: [get]
+  kind: str
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Absolute path of the sample behind an Arrangement audio clip. Read-only. Reading this
+    across a whole track is how you tell a rendered stem from a duplicated Session clip
+    without opening the project file.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.sample_length
+  path: song.tracks[{track}].arrangement_clips[{clip}].sample_length
+  access: [get]
+  kind: int
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Length of the underlying sample in sample frames (not beats, not seconds - the unit
+    vocabulary has no entry for frames). Combined with the project tempo this is the auto-
+    warp check on the timeline: expected beats = frames / sample_rate * bpm / 60.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.is_playing
+  path: song.tracks[{track}].arrangement_clips[{clip}].is_playing
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the transport is currently inside this clip and playing it. Unlike the Session
+    case this is not something you cause by firing the clip - it follows the song
+    position.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.is_triggered
+  path: song.tracks[{track}].arrangement_clips[{clip}].is_triggered
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the clip is armed and waiting for a launch quantization boundary. Present
+    because this is the same class as a Session clip; on the timeline there is no launch
+    to wait for, so it is expected to read false always. Whether it always does is not
+    measured - the row exists so that gets confirmed rather than assumed.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.will_record_on_start
+  path: song.tracks[{track}].arrangement_clips[{clip}].will_record_on_start
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether launching this clip would start a recording. A Session-launch concept;
+    expected to read false on the timeline, where Arrangement recording is driven by the
+    transport and the track's arm state instead. That expectation is not measured.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.sample_rate
+  path: song.tracks[{track}].arrangement_clips[{clip}].sample_rate
+  access: [get]
+  kind: int
+  unit: hz
+  verify: read_back
+  status: verified
+  doc: >-
+    Sample rate of the file behind a timeline audio clip, in Hz - the file's own rate, not
+    the audio interface's. Needed to turn arrangement_clip.sample_length (frames) into
+    seconds, which is the first half of the auto-warp check. Audio clips only.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.is_recording
+  path: song.tracks[{track}].arrangement_clips[{clip}].is_recording
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this timeline clip is currently being recorded into - true during an
+    Arrangement recording pass. Never write notes into it while this is true.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.is_overdubbing
+  path: song.tracks[{track}].arrangement_clips[{clip}].is_overdubbing
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether Live is overdubbing into this timeline clip (Arrangement overdub engaged and
+    the transport inside the clip).
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.playing_position
+  path: song.tracks[{track}].arrangement_clips[{clip}].playing_position
+  access: [get, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Position of the playhead inside this clip, in clip-local beats - not the song
+    position. Add start_time to get the timeline position. Observing it fires constantly;
+    see docs/limits.md §5, "Cost of introspection and of listeners", on the unmeasured
+    cost of many listeners in a real-time process.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.length
+  path: song.tracks[{track}].arrangement_clips[{clip}].length
+  access: [get, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Length of the timeline clip in beats. Read-only and derived from the markers or the
+    loop brace. Same auto-warp check as clip.length: expected beats = seconds * bpm / 60,
+    and a deviation above 2 percent means Live warped the import at a guessed tempo
+    (measured: four 311.7 s files at 124 BPM reported 318.08, 586.13, 350.70 and 931.17
+    instead of 644.2). Warp analysis is asynchronous, so read twice and wait for
+    agreement.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.start_time
+  path: song.tracks[{track}].arrangement_clips[{clip}].start_time
+  access: [get, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Where this clip sits on the song timeline, in beats from the start of the Arrangement.
+    The single most useful number in this area: it is what a duplication pass must be
+    verified against. Measured trap it detects - a duplication call whose time argument is
+    spelled anything other than destination_time falls back silently to 0.0, so 116
+    duplications produced one clip per track, all stacked on beat 0, every call reporting
+    success. If every start_time in arrangement_clip.list reads 0.0, that is this bug and
+    not a coincidence. Documented read-only; if it turns out to be writable it would be
+    the only LOM way to move an Arrangement clip after it exists. Nothing else in the
+    catalog can: destination_time on arrangement_clip.duplicate_from_session fixes the
+    position at creation, and arrangement_clip.position moves the loop brace inside the
+    clip, not the clip along the timeline - worth probing explicitly.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.end_time
+  path: song.tracks[{track}].arrangement_clips[{clip}].end_time
+  access: [get, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Where this clip ends on the song timeline, in beats. Read-only. end_time minus
+    start_time is the clip's footprint on the timeline, which is not the same as
+    clip.length when the clip is looping - a looping clip repeats to fill its footprint.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.position
+  path: song.tracks[{track}].arrangement_clips[{clip}].position
+  access: [get, set, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Position of the loop brace inside the clip, in clip-local beats - NOT the clip's
+    position on the timeline (that is start_time, and it is read-only). The naming is a
+    genuine hazard here; writing this expecting the clip to move along the Arrangement
+    will instead shift what part of the material plays. The read-back is what will show
+    you that.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.start_marker
+  path: song.tracks[{track}].arrangement_clips[{clip}].start_marker
+  access: [get, set, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip-local beat at which playback of this timeline clip begins. Moving it changes
+    which part of the material sounds; it does not move the clip on the timeline.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.end_marker
+  path: song.tracks[{track}].arrangement_clips[{clip}].end_marker
+  access: [get, set, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip-local beat at which playback of this timeline clip ends. Together with
+    start_marker this is what clip length is derived from on a non-looping clip, so
+    writing it is the closest thing the LOM offers to trimming an Arrangement clip -
+    whether the timeline footprint follows is not measured.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.loop_start
+  path: song.tracks[{track}].arrangement_clips[{clip}].loop_start
+  access: [get, set, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    Start of the loop brace inside the timeline clip, clip-local beats. Relevant only when
+    arrangement_clip.looping is true, where it decides which part of the material repeats
+    to fill the clip's timeline footprint.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.loop_end
+  path: song.tracks[{track}].arrangement_clips[{clip}].loop_end
+  access: [get, set, observe]
+  kind: float
+  unit: beats
+  verify: read_back
+  status: verified
+  doc: >-
+    End of the loop brace inside the timeline clip, clip-local beats. When growing a loop
+    write this before loop_start, so the intermediate state stays valid and Live has
+    nothing to clamp.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.looping
+  path: song.tracks[{track}].arrangement_clips[{clip}].looping
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the timeline clip loops within its footprint. This is what lets a 4-bar clip
+    fill 16 bars of Arrangement without being duplicated four times - and it is the
+    difference between end_time minus start_time and clip.length.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.signature_numerator
+  path: song.tracks[{track}].arrangement_clips[{clip}].signature_numerator
+  access: [get, set, observe]
+  kind: int
+  range: [1, 99]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    Top number of the clip's own time signature. Per clip and independent of the song
+    signature; it changes the grid drawn for the clip, not the placement of anything in
+    it. No write has probed the range.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.signature_denominator
+  path: song.tracks[{track}].arrangement_clips[{clip}].signature_denominator
+  access: [get, set, observe]
+  kind: int
+  enum: [1, 2, 4, 8, 16]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    Bottom number of the clip's own time signature; a power of two. The enum lists the
+    values Live's signature control offers; anything else is expected to be rejected or
+    clamped, and the read-back is what proves which.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.gain
+  path: song.tracks[{track}].arrangement_clips[{clip}].gain
+  access: [get, set, observe]
+  kind: float
+  range: [0.0, 1.0]
+  unit: normalized
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip gain of a timeline audio clip, normalised 0.0..1.0 - not dB and not linear. The
+    readable dB figure is arrangement_clip.gain_display_string; a Clip is not a
+    DeviceParameter, so lom_get returns no `display` field for this (docs/protocol.md
+    section 5.3). This is the per-clip trim that makes one section sit differently from
+    another without any automation at all, which also means it is easy to miss when a
+    section is quietly too loud.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.gain_display_string
+  path: song.tracks[{track}].arrangement_clips[{clip}].gain_display_string
+  access: [get, observe]
+  kind: str
+  unit: db
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip gain as the string Live shows, e.g. "-3.0 dB". Read-only, and the only honest
+    route from the normalised value to a physical one. To hit a dB target, write gain,
+    read this, bisect.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.ram_mode
+  path: song.tracks[{track}].arrangement_clips[{clip}].ram_mode
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Keep this timeline clip's sample in RAM instead of streaming it. Audio clips only.
+    Costs memory, buys disk reliability; nothing audible changes, so the read-back is the
+    whole verification.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.warping
+  path: song.tracks[{track}].arrangement_clips[{clip}].warping
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Warp on or off for a timeline audio clip. The Arrangement counterpart of clip.warping,
+    and it carries the same central claim - the LOM is expected to expose this as a
+    writable property. clip.warping has been written and read back; this route has not,
+    and "expected to follow" is not a measurement.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.warp_mode
+  path: song.tracks[{track}].arrangement_clips[{clip}].warp_mode
+  access: [get, set, observe]
+  kind: enum
+  enum: [0, 1, 2, 3, 4, 5, 6]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  means:
+    "0": >-
+      beats
+    "1": >-
+      tones
+    "2": >-
+      texture
+    "3": >-
+      repitch
+    "4": >-
+      complex
+    "5": >-
+      rex
+    "6": >-
+      complex_pro
+  doc: >-
+    Warp algorithm of a timeline audio clip. Documented mapping - 0 Beats, 1 Tones, 2
+    Texture, 3 Re-Pitch, 4 Complex, 5 REX, 6 Complex Pro - read from Live's documentation
+    and not read back from a running instance; confirm against
+    arrangement_clip.available_warp_modes, which is authoritative per clip. Same central
+    claim as clip.warp_mode, which has been written and read back; this route has not.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+    Value names read off Live.Clip.WarpMode through the enum_names handler (docs/protocol.md
+    section 5.12), measured 2026-08-31 against Live 12.4.5 - not transcribed from a reference.
+    Cycling 74's LOM documentation agrees.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.available_warp_modes
+  path: song.tracks[{track}].arrangement_clips[{clip}].available_warp_modes
+  access: [get]
+  kind: list
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Warp modes this timeline clip actually offers, as integers. Authoritative where the
+    enum above is a hypothesis. Live 11 and later.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.warp_markers
+  path: song.tracks[{track}].arrangement_clips[{clip}].warp_markers
+  access: [get]
+  kind: list
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Warp markers of a timeline audio clip, each pairing a beat time with a sample time.
+    Read-only as a collection. A near-empty list right after an import usually means
+    Live's asynchronous analysis has not finished, not that the clip is unwarped. Live 11
+    and later.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.pitch_coarse
+  path: song.tracks[{track}].arrangement_clips[{clip}].pitch_coarse
+  access: [get, set, observe]
+  kind: int
+  range: [-48, 48]
+  unit: semitones
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    Transpose a timeline audio clip in whole semitones. The Arrangement counterpart of
+    clip.pitch_coarse; the LOM is expected to expose it as writable, which no write
+    through this route has confirmed. How it sounds depends on warp_mode - Re-Pitch also
+    changes speed. Range is Live's documented limit, not a measured one.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.pitch_fine
+  path: song.tracks[{track}].arrangement_clips[{clip}].pitch_fine
+  access: [get, set, observe]
+  kind: float
+  range: [-50.0, 49.0]
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Fine detune of a timeline audio clip in cents (the unit vocabulary has no entry for
+    cents, hence none). Adds to pitch_coarse. Range is Live's documented limit, not a
+    measured one.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.muted
+  path: song.tracks[{track}].arrangement_clips[{clip}].muted
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Deactivate this timeline clip - Live's per-clip mute, drawn greyed out. Independent of
+    the track mute. The cheapest way to take one section out without deleting anything,
+    and worth checking when a section verifies correctly and is inaudible.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.velocity_amount
+  path: song.tracks[{track}].arrangement_clips[{clip}].velocity_amount
+  access: [get, set, observe]
+  kind: float
+  range: [0.0, 1.0]
+  unit: normalized
+  verify: read_back
+  status: verified
+  doc: >-
+    How strongly note velocity modulates this timeline MIDI clip's output volume. At 0 the
+    velocities still reach the instrument but stop affecting clip level, which can make a
+    carefully humanised velocity curve inaudible at the output.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.groove
+  path: song.tracks[{track}].arrangement_clips[{clip}].groove
+  access: [get, set, observe]
+  kind: object
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Groove assigned to this timeline clip, as a handle into the song's groove pool, or
+    None. Written with a handle, never a name or index; no write has been made here. The
+    groove pool as a whole is listed unproven in docs/architecture.md, "the catalog".
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.has_groove
+  path: song.tracks[{track}].arrangement_clips[{clip}].has_groove
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether a groove is assigned to this timeline clip. Cheaper to poll than the handle. A
+    groove changes the timing that is heard without changing a single stored note, so a
+    perfectly quantised note list can still swing.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.has_envelopes
+  path: song.tracks[{track}].arrangement_clips[{clip}].has_envelopes
+  access: [get, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether this timeline clip carries clip envelopes. It can read true - clip envelopes
+    travel with a clip when it is duplicated from the Session - even though
+    automation_envelope() returns None here and no new curve can be written. Reading true
+    therefore means "a curve arrived with the clip", not "a curve can be edited". And it
+    says nothing about TRACK automation, which is invisible to the LOM entirely: measured,
+    52 of 174 projects had clip envelopes while 159 of 174 had track automation, so
+    counting only this property misreports 110 projects as unautomated (docs/limits.md, Channel B).
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.legato
+  path: song.tracks[{track}].arrangement_clips[{clip}].legato
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Legato launch flag. Present because this is the same class as a Session clip; it
+    governs launch behaviour, and on the Arrangement timeline there is no launch. Expected
+    to be inert here - not measured, and that is exactly why the row exists rather than
+    being omitted on a guess.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.launch_mode
+  path: song.tracks[{track}].arrangement_clips[{clip}].launch_mode
+  access: [get, set, observe]
+  kind: enum
+  enum: [0, 1, 2, 3]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  means:
+    "0": >-
+      trigger
+    "1": >-
+      gate
+    "2": >-
+      toggle
+    "3": >-
+      repeat
+  doc: >-
+    Launch mode (0 Trigger, 1 Gate, 2 Toggle, 3 Repeat - documented mapping, not read back
+    from a running Live). Stored on the clip because it is the same class; expected to be
+    inert on the timeline. Duplicating a clip from the Session carries this value along,
+    so a value found here says something about where the clip came from, not about how it
+    plays.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+    Value names read off Live.Clip.LaunchMode through the enum_names handler (docs/protocol.md
+    section 5.12), measured 2026-08-31 against Live 12.4.5 - not transcribed from a reference.
+    Cycling 74's LOM documentation agrees.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.launch_quantization
+  path: song.tracks[{track}].arrangement_clips[{clip}].launch_quantization
+  access: [get, set, observe]
+  kind: enum
+  enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  means:
+    "0": >-
+      q_global - follow song.clip_trigger_quantization; this is the default
+    "1": >-
+      q_none - fire immediately, no quantisation
+    "2": >-
+      q_8_bars
+    "3": >-
+      q_4_bars
+    "4": >-
+      q_2_bars
+    "5": >-
+      q_bar - one bar
+    "6": >-
+      q_half - 1/2
+    "7": >-
+      q_half_triplet - 1/2 triplet
+    "8": >-
+      q_quarter - 1/4
+    "9": >-
+      q_quarter_triplet - 1/4 triplet
+    "10": >-
+      q_eighth - 1/8
+    "11": >-
+      q_eighth_triplet - 1/8 triplet
+    "12": >-
+      q_sixteenth - 1/16
+    "13": >-
+      q_sixteenth_triplet - 1/16 triplet
+    "14": >-
+      q_thirtysecond - 1/32
+  doc: >-
+    Per-clip launch quantization on an arrangement clip. Expected to be inert on the timeline,
+    where playback is driven by position rather than by fire(); that expectation is NOT
+    measured. This is NOT the same enum as song.clip_trigger_quantization. That property reads
+    Live.Song.Quantization, which opens with q_no_q at 0; this one reads
+    Live.Clip.ClipLaunchQuantization, which opens with q_global at 0 and q_none at 1. For every
+    member the two share the clip value is the song value PLUS ONE - one bar is 4 there and 5
+    here - so a value carried from one property to the other mis-sets it silently. The spellings
+    differ as well: the song enum has q_eight, q_sixtenth and q_thirtytwoth where this one has
+    q_eighth, q_sixteenth and q_thirtysecond. One shared table cannot serve both. Read verified
+    2026-08-29 against Live 12.4.5; a write was NOT attempted on this row. Value names read off
+    Live.Clip.ClipLaunchQuantization through the enum_names handler (docs/protocol.md section
+    5.12), measured 2026-09-01 against Live 12.4.5 - not transcribed from a reference.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.view_grid_quantization
+  path: song.tracks[{track}].arrangement_clips[{clip}].view.grid_quantization
+  access: [get, set, observe]
+  kind: int
+  unit: none
+  quantized: true
+  verify: read_back
+  status: verified
+  doc: >-
+    Editing grid shown for this timeline clip, as an integer from Live's grid enum;
+    mapping not asserted. A display and snapping setting only - it moves nothing.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.view_grid_is_triplet
+  path: song.tracks[{track}].arrangement_clips[{clip}].view.grid_is_triplet
+  access: [get, set, observe]
+  kind: bool
+  unit: none
+  verify: read_back
+  status: verified
+  doc: >-
+    Whether the editing grid for this timeline clip is in triplets. Display only.
+    Read verified 2026-08-29 against Live 12.4.5; a write was NOT attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+# ---- arrangement clip: getting clips onto the timeline ---------------
+#
+# These three rows are addressed at the TRACK, not at a clip - they are how a
+# clip comes to exist on the timeline in the first place, so they take only
+# `track`.
+
+- id: arrangement_clip.duplicate_from_session
+  path: song.tracks[{track}]
+  access: [call]
+  method: duplicate_clip_to_arrangement
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Copy a Session clip onto this track's Arrangement timeline at destination_time (beats
+    from the start of the Arrangement). The clip is passed as a handle, the time as a
+    float. This is THE route from Session to Arrangement, and the order it imposes is
+    architecture rather than taste - envelopes live inside the clip and travel with the
+    copy, so notes and automation must be finished in the Session clip BEFORE this call.
+    Measured trap, the expensive one: whoever duplicates first and writes the curve
+    afterwards ends up with the curve in the Session clip and in no Arrangement clip at
+    all - and automation_read confirms it, because it reads the Session clip. Second
+    measured trap: a time argument spelled anything other than destination_time falls back
+    silently to 0.0, so 116 duplications produced one clip per track stacked on beat 0
+    with exit code 0. Verify by reading start_time across arrangement_clip.list, never by
+    trusting the call's result. Live 11 and later. The method is on the script's allowlist,
+    and a change to the script needs a Live restart before it reaches Live at all
+    (protocol section 9), so read script_info first if a call is refused.
+    Measured 2026-08-29 against Live 12.4.5: WORKS. The refusal had been the script's
+    method allowlist, not the LOM. A session clip with a volume ramp duplicated to
+    beat 0 gave 1 arrangement clip, and reading the saved .als afterwards showed the
+    arrangement clip carrying its OWN identical ClipEnvelope (same pointee, 133 events) -
+    so clip automation does travel with the duplicate.
+  params:
+    - {name: track, kind: int, required: true}
+  args:
+    - {name: clip, kind: object, required: true}
+    - {name: destination_time, kind: float, required: true}
+
+- id: arrangement_clip.delete
+  path: song.tracks[{track}]
+  access: [call]
+  method: delete_clip
+  destructive: true
+  verify: read_back
+  status: verified
+  doc: >-
+    Delete one Arrangement clip from this track, passed as a handle. Destructive
+    and unrecoverable through this API. It is also the standard repair for the
+    two duplication traps above - a clip on the wrong beat, or one that arrived
+    without its envelope, cannot be fixed in place, it has to go and be
+    duplicated again. Verify by re-reading arrangement_clip.list and counting.
+    Call verified 2026-08-30 against Live 12.4.5: signature delete_clip(AClip) on the Track,
+    with the clip passed by path. The clip was gone - its index answered index_out_of_range -
+    and the neighbouring Arrangement clip read back unchanged.
+  params:
+    - {name: track, kind: int, required: true}
+  args:
+    - {name: clip, kind: object, required: true}
+
+- id: arrangement_clip.create_midi
+  path: song.tracks[{track}]
+  access: [call]
+  method: create_midi_clip
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Create an empty MIDI clip directly on the Arrangement timeline between two beat
+    positions, without going through a Session clip. It removes the whole
+    Session-then-duplicate detour for material that needs no automation - which is why it
+    is here. Newer Live versions only, and MIDI tracks only. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+  args:
+    - {name: start_time, kind: float, required: true}
+    - {name: end_time, kind: float, required: true}
+
+# ---- arrangement clip methods ---------------------------------------
+
+- id: arrangement_clip.fire
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: fire
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Present because this is the same class as a Session clip. On the Arrangement timeline
+    there is nothing to launch - playback follows the transport - so this is expected to
+    do nothing. That it has no effect is not measured; only that the call runs. Call
+    verified 2026-08-30 against Live 12.4.5, on a scratch track created and deleted for
+    the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.stop
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: stop
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Same situation as arrangement_clip.fire: the method exists on the class, there is
+    nothing on the timeline for it to stop, and whether the call has any effect there is
+    not measured. To stop the Arrangement, stop the transport. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.set_fire_button_state
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: set_fire_button_state
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Hold or release a launch button that a timeline clip does not have. Expected
+    to be inert; that is not measured. Included for completeness of the class
+    surface, not because it is useful here.
+    Call verified 2026-08-30 against Live 12.4.5: signature set_fire_button_state(bool).
+    Called with false on an Arrangement clip and returned without error.
+    Clip.set_fire_button_state is the one fire-button call on the allowlist, because it
+    addresses one clip a caller already holds a path to.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: state, kind: bool, required: true}
+
+- id: arrangement_clip.move_playing_pos
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: move_playing_pos
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Move the playhead inside this timeline clip by a relative number of beats. On the
+    Arrangement the playhead belongs to the transport, so this is expected to be inert or
+    to fight the transport - which of the two is not measured. Use the song's current time
+    to move the Arrangement playhead. Call verified 2026-08-30 against Live 12.4.5,
+    on a scratch track created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: beats, kind: float, required: true}
+
+- id: arrangement_clip.scrub
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: scrub
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Start scrubbing this timeline clip from an absolute clip-local beat. Keeps
+    sounding until arrangement_clip.stop_scrub is called - always pair them,
+    including on the error path. What it actually does on the Arrangement was not
+    observed.
+    Call verified 2026-08-30 against Live 12.4.5: signature scrub(double scrub_position).
+    Called with 2 and closed immediately with stop_scrub, which is why this one is allowlisted
+    where Song.scrub_by is not - the gesture has an end.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: beat_time, kind: float, required: true}
+
+- id: arrangement_clip.stop_scrub
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: stop_scrub
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    End a scrub started on this timeline clip. Harmless when nothing is scrubbing. Call
+    verified 2026-08-30 against Live 12.4.5, on a scratch track
+    created and deleted for the purpose. Called with no arguments.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.quantize
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: quantize
+  destructive: false
+  verify: notes_count
+  status: verified
+  doc: >-
+    Quantize the notes of a timeline MIDI clip. Grid is Live's enum as an integer (mapping
+    not asserted); amount is 0.0..1.0, where below 1.0 pulls the notes partway and keeps
+    some human feel. Note counts do not change, so a count check proves nothing - read the
+    notes back if the exact result matters. On the Arrangement this is often the more
+    useful place to quantize than in the Session, because it hits only the one copy. Call
+    verified 2026-08-30 against Live 12.4.5, on a scratch track
+    created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: quantization_grid, kind: int, required: true}
+    - {name: amount, kind: float, required: true}
+
+- id: arrangement_clip.quantize_pitch
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: quantize_pitch
+  destructive: false
+  verify: notes_count
+  status: verified
+  doc: >-
+    Quantize only the notes of one pitch in a timeline MIDI clip - one drum lane without
+    touching the rest. Call verified 2026-08-30 against Live 12.4.5, on a scratch track
+    created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: pitch, kind: int, required: true}
+    - {name: quantization_grid, kind: int, required: true}
+    - {name: amount, kind: float, required: true}
+
+- id: arrangement_clip.crop
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: crop
+  destructive: true
+  verify: clip_length
+  status: verified
+  doc: >-
+    Discard everything outside the loop brace of a timeline clip. Destructive and
+    not undoable through this API. Read loop_start and loop_end before calling,
+    not after. Any clip envelopes that travelled with the clip are cropped too -
+    a second, quiet way an automation curve becomes shorter than intended.
+    Call verified 2026-08-30 against Live 12.4.5: loop_end was set to 2 on a 4-beat
+    Arrangement clip, crop() called, and length read back 2.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.duplicate_loop
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: duplicate_loop
+  destructive: false
+  verify: clip_length
+  status: verified
+  doc: >-
+    Double the loop length of a timeline clip and copy the material into the new half.
+    Whether the clip's footprint on the timeline grows with it, or whether it now loops
+    inside the same footprint, is not measured - read length, start_time and end_time
+    afterwards and see. Call verified 2026-08-30 against Live 12.4.5,
+    on a scratch track created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.duplicate_region
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: duplicate_region
+  destructive: false
+  verify: notes_count
+  status: verified
+  doc: >-
+    Copy a beat range of this timeline clip to another position inside the same clip,
+    optionally transposed. The argument list given here is taken from Live's
+    documentation; its arity has varied between Live versions, and the optional
+    transposition has not been passed here, so call lom_describe before relying on it.
+    Call verified 2026-08-30 against Live 12.4.5, on a scratch track created and deleted
+    for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: region_start, kind: float, required: true}
+    - {name: region_length, kind: float, required: true}
+    - {name: destination_time, kind: float, required: true}
+    - {name: transposition_amount, kind: int, required: false}
+
+- id: arrangement_clip.select_all_notes
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: select_all_notes
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Select every note in this timeline clip. Sets up
+    arrangement_clip.replace_selected_notes, which is the select-all-then-replace idiom
+    that turns the appending set_notes into a real replace. Call verified 2026-08-30
+    against Live 12.4.5: invoked and it returned without error.
+    The set was restored afterwards where the call had any effect.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.deselect_all_notes
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: deselect_all_notes
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Clear the note selection in this timeline clip. Worth calling after a select-all-then-
+    replace so the next human action does not land on an invisible full selection. Call
+    verified 2026-08-30 against Live 12.4.5: invoked and it
+    returned without error. The set was restored afterwards where the call had any effect.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.get_notes_extended
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: get_notes_extended
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Read notes of a timeline MIDI clip in a pitch and time window, with the Live 11 note
+    Read notes of a timeline MIDI clip in a pitch and time window, with the Live 11 note
+    extensions. Arguments are from_pitch, pitch_span, from_time, time_span; the whole clip is
+    (0, 128, 0.0, length). Times are CLIP-LOCAL beats, not timeline beats - add start_time to
+    place a note on the song timeline. Prefer the notes_get handler, which normalises the
+    result. Call verified 2026-08-30 against Live 12.4.5: invoked and it answered "2". The call
+    only reads; nothing in the set was changed. Same precondition as the session twin: MIDI
+    clips only.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: from_pitch, kind: int, required: true}
+    - {name: pitch_span, kind: int, required: true}
+    - {name: from_time, kind: float, required: true}
+    - {name: time_span, kind: float, required: true}
+
+- id: arrangement_clip.get_selected_notes_extended
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: get_selected_notes_extended
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Read only the notes the human currently has selected in this timeline clip - the bridge
+    between an on-screen selection and a scripted edit. Live 11 and later. Call verified
+    2026-08-30 against Live 12.4.5: invoked and it answered "0". The call only reads; nothing in
+    the set was changed. Returns what is selected in the clip view; 0 is normal.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.add_new_notes
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: add_new_notes
+  destructive: false
+  verify: notes_count
+  status: broken
+  doc: >-
+    Add notes to a timeline MIDI clip without removing anything. Additive by design and
+    honest about it, unlike set_notes - but the outcome of calling it twice with the same
+    material is identical: doubled notes. Verify with notes_get, whose count is the
+    clip's, not the list you sent. Live 11 and later. Measured
+    2026-08-30 against Live 12.4.5: the method exists and is on the allowlist, but it is
+    NOT reachable through lom_call. It takes a Live value object (a MidiNoteSpecification,
+    a WarpMarker) that has to be CONSTRUCTED inside Live, and lom_call passes JSON through; Live answers type_error "No registered converter was able to produce...". The
+    {"__path__": ...} form resolves an EXISTING object; it cannot build a new one. Use the
+    notes_set handler instead, which constructs the specifications itself (verified: the
+    same write that failed here succeeded through notes_set). This is the boundary of the
+    generic path and the reason the specialised handlers exist at all.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: notes, kind: list, required: true}
+
+- id: arrangement_clip.apply_note_modifications
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: apply_note_modifications
+  destructive: false
+  verify: notes_count
+  status: broken
+  doc: >-
+    Write changed notes back to a timeline clip by note id - a true in-place update,
+    leaving notes whose ids are not listed untouched. The ids come from get_notes_extended
+    or get_selected_notes_extended. Live 11 and later. Measured
+    2026-08-30 against Live 12.4.5: the method exists and is on the allowlist, but it is
+    NOT reachable through lom_call. It takes a Live value object (a MidiNoteSpecification,
+    a WarpMarker) that has to be CONSTRUCTED inside Live, and lom_call passes JSON through; Live answers type_error "No registered converter was able to produce...". The
+    {"__path__": ...} form resolves an EXISTING object; it cannot build a new one. Use the
+    notes_set handler instead, which constructs the specifications itself (verified: the
+    same write that failed here succeeded through notes_set). This is the boundary of the
+    generic path and the reason the specialised handlers exist at all.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: notes, kind: list, required: true}
+
+- id: arrangement_clip.remove_notes_extended
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: remove_notes_extended
+  destructive: true
+  verify: notes_count
+  status: verified
+  doc: >-
+    Delete every note of a timeline clip inside a pitch and time window. The
+    whole clip is (0, 128, 0.0, length). Destructive; this is the remove half of
+    what the notes_set handler does atomically inside Live so that a clip is
+    never left empty between the remove and the write.
+    Call verified 2026-08-30 against Live 12.4.5: signature remove_notes_extended(int
+    from_pitch, int pitch_span, double from_time, double time_span). Called with (60, 1, 0, 4)
+    on a clip of four notes; get_notes_extended read back three, the C4 gone.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: from_pitch, kind: int, required: true}
+    - {name: pitch_span, kind: int, required: true}
+    - {name: from_time, kind: float, required: true}
+    - {name: time_span, kind: float, required: true}
+
+- id: arrangement_clip.replace_selected_notes
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: replace_selected_notes
+  destructive: true
+  verify: notes_count
+  status: broken
+  doc: >-
+    Replace the selected notes of a timeline clip with the given list. Paired with
+    select_all_notes this is the pre-Live-11 way to make a real replace out of the
+    appending set_notes. Destructive: the selection is gone once it returns. Measured
+    2026-08-30 against Live 12.4.5: the method exists and is on the allowlist, but it is
+    NOT reachable through lom_call. It takes a Live value object (a MidiNoteSpecification,
+    a WarpMarker) that has to be CONSTRUCTED inside Live, and lom_call passes JSON through; Live answers type_error "No registered converter was able to produce...". The
+    {"__path__": ...} form resolves an EXISTING object; it cannot build a new one. Use the
+    notes_set handler instead, which constructs the specifications itself (verified: the
+    same write that failed here succeeded through notes_set). This is the boundary of the
+    generic path and the reason the specialised handlers exist at all.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: notes, kind: list, required: true}
+
+- id: arrangement_clip.set_notes
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: set_notes
+  destructive: true
+  verify: notes_count
+  status: broken
+  doc: >-
+    MEASURED TRAP, identical to clip.set_notes and worth repeating on this route
+    because the timeline is where it usually bites: Clip.set_notes() APPENDS, it
+    does not replace, and the call reports the length of the list it was GIVEN,
+    not the length of the clip. Measured at the artefact - 63 notes plus a
+    "correcting" 23 left 86 in the clip, reported as 23. A second call is a
+    duplication that looks like a success. Marked destructive so the executor
+    demands confirm=True. Use the notes_set handler, which defaults to replace
+    (docs/protocol.md section 5.8), and reach for this only when appending is
+    genuinely intended.
+    REFUSED by this script's allowlist, by design - see clip.set_notes. Same method, same
+    modal dialog.
+    Measured 2026-08-29 against Live 12.4.5: the dialog this opens blocked Live's main thread
+    for as long as it stood. Refused by name, so the call never reaches Live.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: notes, kind: list, required: true}
+
+- id: arrangement_clip.get_notes_by_id
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: get_notes_by_id
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Read specific notes of a timeline clip by note id. Live 11 and later. Call verified
+    2026-08-30 against Live 12.4.5: invoked and it answered "1". The call only reads;
+    nothing in the set was changed.
+    Takes a LIST of note ids; ids come from notes_get.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: note_ids, kind: list, required: true}
+
+- id: arrangement_clip.remove_notes_by_id
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: remove_notes_by_id
+  destructive: true
+  verify: notes_count
+  status: verified
+  doc: >-
+    Delete exactly the listed notes from a timeline clip, leaving everything
+    adjacent alone. This is what a surgical repair looks like on the Arrangement
+    - without it the equivalent has to be done offline in the .als by tuple
+    comparison; one measured repair removed 23 stray notes from 14 clips per
+    track that way. Live 11 and later.
+    Call verified 2026-08-30 against Live 12.4.5: signature remove_notes_by_id(object). Note
+    ids come from the notes_get handler, which takes any clip path; the read_clip_notes MCP
+    tool builds a Session path from track and slot and so cannot reach an Arrangement clip.
+    Called with one id on a clip of four notes; notes_get read back three, the addressed pitch
+    gone.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: note_ids, kind: list, required: true}
+
+- id: arrangement_clip.duplicate_notes_by_id
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: duplicate_notes_by_id
+  destructive: false
+  verify: notes_count
+  status: verified
+  doc: >-
+    Duplicate specific notes of a timeline clip by id, optionally to a new time
+    and transposed. Live 11 and later.
+    Call verified 2026-08-30 against Live 12.4.5: signature duplicate_notes_by_id(object
+    note_ids, object destination_time=None, int transposition_amount=0). Called with ([id],
+    8.0, 12) on a clip of three notes; notes_get read back four, the copy twelve semitones
+    above the original.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: note_ids, kind: list, required: true}
+    - {name: destination_time, kind: float, required: false}
+    - {name: transposition_amount, kind: int, required: false}
+
+- id: arrangement_clip.automation_envelope
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: automation_envelope
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    MEASURED LIMIT, and the single most important row in this area. On an Arrangement clip
+    this returns None. Always. Quoting the Live Object Model directly - it returns the
+    envelope for the given parameter, None if the envelope does not exist, None for
+    Arrangement clips, and None for parameters from a different track. There is no way to
+    write clip automation here, and no argument or Live version changes that. The working
+    order is therefore fixed: create the Session clip, write its notes, write its
+    automation, and only then duplicate it to the Arrangement, where the envelope travels
+    with the copy. Never the reverse. The trap that follows from getting the order wrong
+    is silent - automation_read on the Session clip still reports has_envelope true and
+    is_flat false, so the verification passes while every Arrangement clip is empty.
+    Checking that requires the saved project file: Channel B, docs/limits.md. Call
+    verified 2026-08-30 against Live 12.4.5, on a scratch track
+    created and deleted for the purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: parameter, kind: object, required: true}
+
+- id: arrangement_clip.create_automation_envelope
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: create_automation_envelope
+  destructive: false
+  verify: envelope_present
+  status: broken
+  doc: >-
+    Create an envelope for a device parameter on a timeline clip. Expected to
+    fail or to return something unusable, for the same reason
+    arrangement_clip.automation_envelope returns None - clip automation is a
+    Session-clip facility. Listed rather than omitted so probe_paths.py records
+    which of the two it does. If it unexpectedly works, docs/limits.md needs rewriting, not
+    this file.
+    Live refuses this on an Arrangement clip: 'RuntimeError: Not a session clip or parameter
+    belongs to another track.' (measured 2026-08-30 against Live 12.4.5). This is the same
+    wall as clip.automation_envelope returning None here - automation belongs to Session
+    clips. Write the envelope in a Session clip and duplicate that clip into the Arrangement;
+    the automation travels.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: parameter, kind: object, required: true}
+
+- id: arrangement_clip.clear_envelope
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: clear_envelope
+  destructive: true
+  verify: envelope_absent
+  status: verified
+  doc: >-
+    Delete the envelope for one device parameter on a timeline clip. Envelopes can be
+    PRESENT here even though they cannot be created here - they arrive with a duplicated
+    Session clip - so removal may well work where creation does not; that it removes
+    anything has not been read back. Destructive, and a clip whose envelope has been
+    cleared cannot get it back except by being deleted and duplicated again. Call verified
+    2026-08-30 against Live 12.4.5, on a scratch track created and deleted for the
+    purpose.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: parameter, kind: object, required: true}
+
+- id: arrangement_clip.clear_all_envelopes
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: clear_all_envelopes
+  destructive: true
+  verify: none
+  status: verified
+  doc: >-
+    Delete every clip envelope on this timeline clip at once. Destructive and
+    wide; it takes curves nobody was thinking about along with the one being
+    fixed, and on the Arrangement they cannot be rewritten - only re-duplicated
+    from the Session. Prefer arrangement_clip.clear_envelope with a named
+    parameter. Note also what this does NOT touch: track automation, which is not
+    part of any clip and is invisible to the LOM entirely (docs/limits.md).
+    Measured 2026-08-30 against Live 12.4.5: the call runs without error on an Arrangement
+    clip, and its effect cannot be read back there - an Arrangement clip has no envelope to
+    clear, because create_automation_envelope is refused on it and automation_envelope answers
+    None. Accepted, unconfirmed.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.view_show_envelope
+  path: song.tracks[{track}].arrangement_clips[{clip}].view
+  access: [call]
+  method: show_envelope
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Open the envelope lane for this timeline clip in the editor. View only. Call verified
+    2026-08-30 against Live 12.4.5 with Remote Script
+    0.6.x, on a scratch track created and deleted for the purpose. Called with no
+    arguments.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.view_hide_envelope
+  path: song.tracks[{track}].arrangement_clips[{clip}].view
+  access: [call]
+  method: hide_envelope
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Close the envelope lane for this timeline clip. View only. Call verified 2026-08-30
+    against Live 12.4.5, on a scratch track created and deleted for the purpose. Called
+    with no arguments.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.view_select_envelope_parameter
+  path: song.tracks[{track}].arrangement_clips[{clip}].view
+  access: [call]
+  method: select_envelope_parameter
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Choose which parameter's envelope the editor shows for this timeline clip,
+    given as a parameter handle. View only, and it does not create anything -
+    on the Arrangement, where no envelope can be created, an empty lane is the
+    likely result for a parameter that has no curve. Envelopes belong to a
+    specific device instance, so the handle must come from the right device in
+    the right chain.
+    Call verified 2026-08-30 against Live 12.4.5: called on the clip's VIEW - the path this
+    row already carries - with a mixer volume parameter passed by path, and returned without
+    error. The row addresses arrangement_clips[N].view and the method is
+    select_envelope_parameter; there is no Clip.view_select_envelope_parameter, and the script
+    refuses that name.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+  args:
+    - {name: parameter, kind: object, required: true}
+
+- id: arrangement_clip.view_show_loop
+  path: song.tracks[{track}].arrangement_clips[{clip}].view
+  access: [call]
+  method: show_loop
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Scroll the editor so this timeline clip's loop brace is in view. View only. Call
+    verified 2026-08-30 against Live 12.4.5 with Remote
+    Script 0.6.x, on a scratch track created and deleted for the purpose. Called with no
+    arguments.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+# ---------------------------------------------------------------------------
+# Appended by scripts/sync_catalog.py, 2026-08-30 against Live 12.4.5.
+# Live reports these on the objects named in each row's doc; the
+# catalog did not have them. Statuses come from the read that found
+# them and from nothing else.
+# ---------------------------------------------------------------------------
+
+- id: clip.automation_envelopes
+  path: song.tracks[{track}].clip_slots[{slot}].clip.automation_envelopes
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip.automation_envelopes, found on the running object model and absent from this catalog
+    until scripts/sync_catalog.py proposed it. Whether it can be written is not knowable from a
+    describe: Live's generated types use C-level descriptors that always look writable and raise
+    at assignment time, so the script reports null rather than guessing. Read verified
+    2026-08-30 against Live 12.4.5 at song.tracks[11].clip_slots[0].clip.automation_envelopes
+    through lom_describe: a Vector of 0 element(s). No write, call, observation or automation
+    was attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.is_session_clip
+  path: song.tracks[{track}].clip_slots[{slot}].clip.is_session_clip
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip.is_session_clip, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at song.tracks[11].clip_slots[0].clip.is_session_clip through
+    lom_describe: returned True (bool). No write, call, observation or automation was attempted
+    on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.is_take_lane_clip
+  path: song.tracks[{track}].clip_slots[{slot}].clip.is_take_lane_clip
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip.is_take_lane_clip, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at song.tracks[11].clip_slots[0].clip.is_take_lane_clip through
+    lom_describe: returned False (bool). No write, call, observation or automation was attempted
+    on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+- id: clip.view
+  path: song.tracks[{track}].clip_slots[{slot}].clip.view
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip.view, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Whether it can be written is not knowable from a
+    describe: Live's generated types use C-level descriptors that always look writable and raise
+    at assignment time, so the script reports null rather than guessing. Read verified
+    2026-08-30 against Live 12.4.5 at song.tracks[11].clip_slots[0].clip.view through
+    lom_describe: a View object. No write, call, observation or automation was attempted on this
+    row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: slot, kind: int, required: true}
+
+# ---------------------------------------------------------------------------
+# Appended by scripts/sync_catalog.py, 2026-08-30 against Live 12.4.5.
+# Live reports these on the objects named in each row's doc; the
+# catalog did not have them. Statuses come from the read that found
+# them and from nothing else.
+# ---------------------------------------------------------------------------
+
+- id: arrangement_clip.automation_envelopes
+  path: song.tracks[{track}].arrangement_clips[{clip}].automation_envelopes
+  access: [get]
+  kind: list
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip.automation_envelopes, found on the running object model and absent from this catalog
+    until scripts/sync_catalog.py proposed it. Whether it can be written is not knowable from a
+    describe: Live's generated types use C-level descriptors that always look writable and raise
+    at assignment time, so the script reports null rather than guessing. Read verified
+    2026-08-30 against Live 12.4.5 at song.tracks[15].arrangement_clips[0].automation_envelopes
+    through lom_describe: a Vector of 0 element(s). No write, call, observation or automation
+    was attempted on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.is_session_clip
+  path: song.tracks[{track}].arrangement_clips[{clip}].is_session_clip
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip.is_session_clip, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at song.tracks[15].arrangement_clips[0].is_session_clip through
+    lom_describe: returned False (bool). No write, call, observation or automation was attempted
+    on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.is_take_lane_clip
+  path: song.tracks[{track}].arrangement_clips[{clip}].is_take_lane_clip
+  access: [get]
+  kind: bool
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip.is_take_lane_clip, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Live reports it as read-only. Read verified 2026-08-30
+    against Live 12.4.5 at song.tracks[15].arrangement_clips[0].is_take_lane_clip through
+    lom_describe: returned False (bool). No write, call, observation or automation was attempted
+    on this row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.view
+  path: song.tracks[{track}].arrangement_clips[{clip}].view
+  access: [get]
+  kind: object
+  unit: none
+  destructive: false
+  verify: read_back
+  status: verified
+  doc: >-
+    Clip.view, found on the running object model and absent from this catalog until
+    scripts/sync_catalog.py proposed it. Whether it can be written is not knowable from a
+    describe: Live's generated types use C-level descriptors that always look writable and raise
+    at assignment time, so the script reports null rather than guessing. Read verified
+    2026-08-30 against Live 12.4.5 at song.tracks[15].arrangement_clips[0].view through
+    lom_describe: a View object. No write, call, observation or automation was attempted on this
+    row.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.beat_to_sample_time
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: beat_to_sample_time
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Clip.beat_to_sample_time() exists on the object at
+    song.tracks[15].arrangement_clips[0] in the running Live and is on the Remote Script's
+    allowlist, so lom_call will attempt it. Its arguments were NOT read: the LOM publishes
+    no signature over this channel, so `args` is empty and a call that needs arguments
+    will answer type_error until somebody fills them in. What it returns is unknown, hence
+    kind: object. Nothing has called it; this row is a reachable hypothesis, not a
+    capability, and the run that found it is recorded in the sync_catalog report rather
+    than here, because an untested row may not carry a measurement note. Call verified
+    2026-08-30 against Live 12.4.5, on a scratch track created
+    and deleted for the purpose. Audio clips only.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
+
+- id: arrangement_clip.sample_to_beat_time
+  path: song.tracks[{track}].arrangement_clips[{clip}]
+  access: [call]
+  method: sample_to_beat_time
+  kind: object
+  unit: none
+  destructive: false
+  verify: none
+  status: verified
+  doc: >-
+    Clip.sample_to_beat_time() exists on the object at
+    song.tracks[15].arrangement_clips[0] in the running Live and is on the Remote Script's
+    allowlist, so lom_call will attempt it. Its arguments were NOT read: the LOM publishes
+    no signature over this channel, so `args` is empty and a call that needs arguments
+    will answer type_error until somebody fills them in. What it returns is unknown, hence
+    kind: object. Nothing has called it; this row is a reachable hypothesis, not a
+    capability, and the run that found it is recorded in the sync_catalog report rather
+    than here, because an untested row may not carry a measurement note. Call verified
+    2026-08-30 against Live 12.4.5, on a scratch track created
+    and deleted for the purpose. Audio clips only.
+  params:
+    - {name: track, kind: int, required: true}
+    - {name: clip, kind: int, required: true}
